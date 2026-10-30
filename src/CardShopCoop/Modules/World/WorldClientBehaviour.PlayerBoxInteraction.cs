@@ -1,3 +1,4 @@
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -10,6 +11,13 @@ namespace CardShopCoop.Modules.World
 {
     public sealed partial class WorldClientBehaviour
     {
+        /// <summary>True while this client is applying authority (an inbound handler's game
+        /// change or an action's undo/merge) rather than observing a local player interaction.
+        /// The box protocol uses this to keep its own replays from creating a second
+        /// prediction.</summary>
+        internal static bool IsApplyingAuthorityNow
+            => _instance != null && ReentrancyGuard.Suppressed(_instance);
+
         private PlayerBoxInteraction.LocalAction CapturePlayerBoxAction(
             InteractablePackagingBox box, bool isPlayer, bool alignBody)
         {
@@ -62,24 +70,9 @@ namespace CardShopCoop.Modules.World
             internal bool Scope;
         }
 
-        private void ApplyPredictedFurnitureBoxUp(InteractableObject obj)
-        {
-            // A destroyed subject cannot be boxed up again; skip instead of throwing during a
-            // reconcile replay (the sibling undo already guards this).
-            if (obj == null)
-            {
-                return;
-            }
-
-            // The write scope is the one suppression signal observers use; the box-up patch
-            // asks ReentrancyGuard.Suppressed and skips this replay.
-            using (Writes.Enter())
-            {
-                obj.BoxUpObject(false);
-                WarehouseShelfInteraction.SetStoredBoxVisuals(obj, false);
-            }
-        }
-
+        /// <summary>Reverses a local furniture box-up prediction through the game's own place path.
+        /// The write scope marks the change as authority so the box-up patch does not forward it.
+        /// </summary>
         private void UndoPredictedFurnitureBoxUp(InteractableObject obj)
         {
             if (obj == null)
@@ -103,6 +96,12 @@ namespace CardShopCoop.Modules.World
                     obj.transform.rotation);
             }
         }
+
+        /// <summary>The furniture box-up action's rejection hook. The game already boxed the
+        /// furniture up locally; this reverses that prediction through the game's own place path.
+        /// </summary>
+        internal static void UndoFurnitureBoxUpPrediction(InteractableObject furniture)
+            => _instance?.UndoPredictedFurnitureBoxUp(furniture);
 
         [HarmonyPatch(typeof(InteractableObject), "BoxUpObject")]
         private static class FurnitureBoxUpPatch
@@ -175,11 +174,18 @@ namespace CardShopCoop.Modules.World
                     Position = __state.Position,
                     Entity = obj,
                 };
-                // The game already boxed the furniture up; the prediction only records how to redo
-                // and undo that change through the game's own methods.
-                WorldAction.Submit(WorldAction.BoxesScope, intent,
-                    () => _instance.ApplyPredictedFurnitureBoxUp(obj),
-                    () => _instance.UndoPredictedFurnitureBoxUp(obj));
+                // The game already boxed the furniture up; the host validates and applies its own
+                // copy. The action's rejection hook reverses this local prediction; there is no
+                // separate replay because the game owns the mutation.
+                var context = _instance.Context;
+                if (context == null)
+                {
+                    CoopPlugin.Log.LogError("[box-furniture] cannot send the box-up action for "
+                        + obj.name + ": the co-op session context is not ready.");
+                    return;
+                }
+
+                context.Send(intent);
             }
         }
 
@@ -228,19 +234,32 @@ namespace CardShopCoop.Modules.World
         {
             if (_playerBoxInteraction == null)
             {
-
                 return false;
             }
 
-            // Pickup/placement/throw are only ever echoed back after the host applied the guest's
-            // own intent (a rejection comes as a prediction rollback), so this confirms the
-            // prediction. Applying it authoritatively would first undo the hold/move/throw and
-            // replay it: the box re-lerps into the hand, or the throw is re-applied.
-
-            WorldAction.AckOrApply(message,
-                () => _playerBoxInteraction.ApplyIncoming(message));
-            return true;
+            // The host never echoes an acting client's own prediction back at it: a player-box
+            // resolution arrives as the action response (OnUndo/OnMerge), and this path only
+            // applies another player's accepted state.
+            return _playerBoxInteraction.ApplyIncoming(message);
         }
+
+        /// <summary>Client: reverses the local prediction of a rejected player-box action.</summary>
+        internal static void UndoPlayerBoxAction(PlayerBoxInteractionAction action)
+            => _instance?._playerBoxInteraction?.UndoAction(action);
+
+        /// <summary>Client: settles a resolved player-box action, merging the host's post-action
+        /// state when the prediction was refused.</summary>
+        internal static void MergePlayerBoxAction(PlayerBoxInteractionAction action,
+            ActionResponseMessage response)
+            => _instance?._playerBoxInteraction?.MergeAction(action, response);
+
+        /// <summary>Client: merges the absolute contents/open state a box-state action's
+        /// response carries. The box-state message's own merge hook calls this so a refused
+        /// contents change lands on the host's state instead of an inverted local snapshot.</summary>
+        internal static bool MergeBoxStateResult(InteractablePackagingBox box, EItemType itemType,
+            int itemCount, bool isBoxOpened)
+            => _instance?._boxNetworkInteraction
+                ?.ClientApplyItemState(box, itemType, itemCount, isBoxOpened) == true;
 
         [HarmonyPatch(typeof(InteractablePackagingBox), "StartHoldBox")]
         private static class PlayerBoxPickupPatch
@@ -368,7 +387,15 @@ namespace CardShopCoop.Modules.World
             }
 
             var compartment = item.m_ItemCompartment;
-            SendClientIntent(new BoxStateRequestMessage
+            var context = Context;
+            if (context == null)
+            {
+                CoopPlugin.Log.LogError("[box-id] cannot send the item-box state for " + item.name
+                    + ": the co-op session context is not ready.");
+                return;
+            }
+
+            context.Send(new BoxStateRequestMessage
             {
                 Box = item,
                 IsBoxOpened = BoxNetworkInteraction.IsBoxOpen(item),

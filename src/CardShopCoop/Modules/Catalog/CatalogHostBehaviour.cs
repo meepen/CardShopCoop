@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
+using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -24,7 +25,7 @@ namespace CardShopCoop.Modules.Catalog
             "UpdateTotalCostAndBoxCount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         private static CatalogHostBehaviour _active;
-        private readonly HashSet<int> _joined = new();
+        private readonly Dictionary<int, PeerConnection> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
         private bool _shutdown;
         private bool _initialized;
@@ -79,7 +80,7 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _joined.Add(peer.Id);
+            _joined[peer.Id] = peer;
             if (!SendState(peer.Id))
             {
                 _baselinePending.Add(peer.Id);
@@ -144,14 +145,14 @@ namespace CardShopCoop.Modules.Catalog
 
             if (publish)
             {
-                active.BroadcastProductDelta(Guid.Empty, data, true);
+                active.BroadcastProductDelta(data, true);
             }
 
 
             return true;
         }
 
-        internal static bool PublishProductLicense(RestockData data, Guid actionId)
+        internal static bool PublishProductLicense(RestockData data)
         {
             if (_active == null || data == null)
             {
@@ -160,7 +161,7 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _active.BroadcastProductDelta(actionId, data, true);
+            _active.BroadcastProductDelta(data, true);
             return true;
         }
 
@@ -190,7 +191,7 @@ namespace CardShopCoop.Modules.Catalog
             changed = true;
             if (publish)
             {
-                _active.BroadcastScannerDelta(Guid.Empty, true);
+                _active.BroadcastScannerDelta(true);
             }
 
 
@@ -224,7 +225,7 @@ namespace CardShopCoop.Modules.Catalog
             }
         }
 
-        internal static bool PublishScannerUnlock(Guid actionId)
+        internal static bool PublishScannerUnlock()
         {
             if (_active == null)
             {
@@ -233,7 +234,7 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _active.BroadcastScannerDelta(actionId, true);
+            _active.BroadcastScannerDelta(true);
             return true;
         }
 
@@ -261,7 +262,7 @@ namespace CardShopCoop.Modules.Catalog
                     var data = CatalogInterop.At(changed[i].Index);
                     if (data != null)
                     {
-                        _active.BroadcastProductDelta(Guid.Empty, data, changed[i].Unlocked);
+                        _active.BroadcastProductDelta(data, changed[i].Unlocked);
                     }
 
                 }
@@ -283,7 +284,7 @@ namespace CardShopCoop.Modules.Catalog
 
 
             CPlayerData.m_IsScannerRestockUnlocked = unlocked;
-            _active.BroadcastScannerDelta(Guid.Empty, unlocked);
+            _active.BroadcastScannerDelta(unlocked);
             return true;
         }
 
@@ -315,18 +316,21 @@ namespace CardShopCoop.Modules.Catalog
 
 
             Util.MemoryProbe.Log("catalog-baseline:before conn=" + connectionId);
-            RuntimeContext.Send(connectionId, new CatalogLicenseStateMessage
+            if (_joined.TryGetValue(connectionId, out var connection))
             {
-                ScannerUnlocked = scanner,
-                Entries = entries,
-            });
+                PeerHandle.ForConnection(connection)?.Send(new CatalogLicenseStateMessage
+                {
+                    ScannerUnlocked = scanner,
+                    Entries = entries,
+                });
+            }
             Util.MemoryProbe.Log("catalog-baseline:after conn=" + connectionId
                 + " entries=" + entries.Count);
             _baselinePending.Remove(connectionId);
             return true;
         }
 
-        private void BroadcastProductDelta(Guid actionId, RestockData data, bool unlocked)
+        private void BroadcastProductDelta(RestockData data, bool unlocked)
         {
             if (_shutdown || !RuntimeContext.InGame() || data == null)
             {
@@ -334,9 +338,8 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            RuntimeContext.Broadcast(new CatalogLicenseDeltaMessage
+            Context.Broadcast(new CatalogLicenseDeltaMessage
             {
-                ActionId = actionId,
                 Scanner = false,
                 Unlocked = unlocked,
                 ItemType = data.itemType,
@@ -345,7 +348,7 @@ namespace CardShopCoop.Modules.Catalog
             });
         }
 
-        private void BroadcastScannerDelta(Guid actionId, bool unlocked)
+        private void BroadcastScannerDelta(bool unlocked)
         {
             if (_shutdown || !RuntimeContext.InGame())
             {
@@ -353,9 +356,8 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            RuntimeContext.Broadcast(new CatalogLicenseDeltaMessage
+            Context.Broadcast(new CatalogLicenseDeltaMessage
             {
-                ActionId = actionId,
                 Scanner = true,
                 Unlocked = unlocked,
             });
@@ -365,7 +367,7 @@ namespace CardShopCoop.Modules.Catalog
         {
             foreach (var connectionId in new List<int>(_baselinePending))
             {
-                if (!_joined.Contains(connectionId))
+                if (!_joined.ContainsKey(connectionId))
                 {
                     _baselinePending.Remove(connectionId);
                     continue;
@@ -409,7 +411,7 @@ namespace CardShopCoop.Modules.Catalog
                     if (data != null)
                     {
 
-                        _active.BroadcastProductDelta(Guid.Empty, data, true);
+                        _active.BroadcastProductDelta(data, true);
                     }
 
                 }
@@ -425,7 +427,7 @@ namespace CardShopCoop.Modules.Catalog
                 if (_active != null && !_active._applying)
                 {
 
-                    _active.BroadcastScannerDelta(Guid.Empty,
+                    _active.BroadcastScannerDelta(
                         CPlayerData.m_IsScannerRestockUnlocked);
                 }
 

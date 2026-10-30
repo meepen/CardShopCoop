@@ -11,7 +11,8 @@ namespace CardShopCoop.Modules.World
 
         internal void InstallPlacementHold()
         {
-            _placementHold = new PlacementHoldInteraction(false, _ => { }, RuntimeContext.Send);
+            _placementHold = new PlacementHoldInteraction(false, _ => { },
+                (_, message) => Context.Send(message));
             Harmony.CreateClassProcessor(typeof(PlacementHoldBoxUpPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
             Harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();

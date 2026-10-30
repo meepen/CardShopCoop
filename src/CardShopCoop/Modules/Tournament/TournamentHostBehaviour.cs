@@ -1,5 +1,6 @@
 using System;
 using CardShopCoop.Attributes;
+using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -47,14 +48,15 @@ namespace CardShopCoop.Modules.Tournament
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
-            if (_shutdown || connection == null || !IsJoinPhase(connection.State)
+            var peer = PeerHandle.ForConnection(connection);
+            if (_shutdown || peer == null || !IsJoinPhase(peer.State)
                 || !RuntimeContext.InGame() || !TryBuildState(out var baseline))
             {
                 return;
             }
 
             baseline.Full = true;
-            RuntimeContext.Send(connection.Id, baseline);
+            peer.Send(baseline);
         }
 
         internal void Shutdown()
@@ -177,7 +179,7 @@ namespace CardShopCoop.Modules.Tournament
                 return;
             }
 
-            RuntimeContext.Broadcast(message);
+            Context.Broadcast(message);
         }
 
         private TournamentStateMessage BuildState(TournamentData tournament)

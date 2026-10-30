@@ -83,7 +83,7 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [IntentValidator]
-        private IntentValidation ValidateLock(CoopMessageContext context,
+        private IntentValidation ValidateLock(MessageContext context,
             ShopRenameLockIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -105,7 +105,7 @@ namespace CardShopCoop.Modules.Shop
         /// <summary>Release is a session fact, not a command: it has no action id to roll back and
         /// must land even while a peer is between scenes, so only authentication gates it.</summary>
         [IntentValidator]
-        private IntentValidation ValidateRelease(CoopMessageContext context,
+        private IntentValidation ValidateRelease(MessageContext context,
             ShopRenameReleaseMessage message)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -119,7 +119,7 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [IntentRejected]
-        private void LockRejected(CoopMessageContext context, ShopRenameLockIntent message,
+        private void LockRejected(MessageContext context, ShopRenameLockIntent message,
             string reason)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -132,14 +132,13 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [MessageHandler]
-        private ActionOutcome Handle(CoopMessageContext context, ShopRenameLockIntent message)
+        private ActionOutcome Handle(MessageContext context, ShopRenameLockIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
                 return ActionOutcome.Reject("shop rename session is not active");
             }
 
-            message.OnApply();
             var sender = context.ConnectionId;
             if (!RuntimeContext.InGame())
             {
@@ -174,7 +173,7 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [MessageHandler]
-        private void Handle(CoopMessageContext context, ShopRenameReleaseMessage message)
+        private void Handle(MessageContext context, ShopRenameReleaseMessage message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
@@ -190,7 +189,7 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [IntentValidator]
-        private IntentValidation ValidateRename(CoopMessageContext context,
+        private IntentValidation ValidateRename(MessageContext context,
             ShopRenameRequestIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -204,7 +203,7 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [IntentRejected]
-        private void RenameRejected(CoopMessageContext context, ShopRenameRequestIntent message,
+        private void RenameRejected(MessageContext context, ShopRenameRequestIntent message,
             string reason)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -217,14 +216,13 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [MessageHandler]
-        private ActionOutcome Handle(CoopMessageContext context, ShopRenameRequestIntent message)
+        private ActionOutcome Handle(MessageContext context, ShopRenameRequestIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
                 return ActionOutcome.Reject("shop rename session is not active");
             }
 
-            message.OnApply();
             var sender = context.ConnectionId;
             if (!RuntimeContext.InGame())
             {
@@ -311,7 +309,7 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [MessageHandler]
-        private void Handle(CoopMessageContext context, ShopRenameDraftIntent message)
+        private void Handle(MessageContext context, ShopRenameDraftIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null
                 || !context.IsAuthenticated)
@@ -330,7 +328,7 @@ namespace CardShopCoop.Modules.Shop
             PublishDraft();
         }
 
-        private void RejectRename(CoopMessageContext context, ShopRenameRequestIntent message,
+        private void RejectRename(MessageContext context, ShopRenameRequestIntent message,
             bool releaseOwner)
         {
             if (releaseOwner && ShopRenameSession.IsOwner(context.ConnectionId))

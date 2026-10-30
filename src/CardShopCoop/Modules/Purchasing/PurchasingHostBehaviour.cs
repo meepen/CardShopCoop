@@ -448,7 +448,7 @@ namespace CardShopCoop.Modules.Purchasing
             _active = this;
         }
 
-        /// <summary>Runs from the concrete restock intent's <c>OnApply</c> on the host, with the
+        /// <summary>Runs from the concrete restock intent's handler on the host, with the
         /// authenticated sender already filled in by the router.</summary>
         internal PurchaseOutcomeMessage ApplyRestockPurchase(RestockPurchaseIntent intent)
         {
@@ -487,20 +487,15 @@ namespace CardShopCoop.Modules.Purchasing
         private PurchaseOutcomeMessage ApplyPurchase(ActionMessage intent, PurchaseKind kind,
             List<PurchaseLine> lines, Func<PurchasePlan, string> build)
         {
-            if (_shutdown || !RuntimeContext.InGame() || intent == null)
+            if (_shutdown || !RuntimeContext.InGame() || intent == null
+                || intent.Peer == null)
             {
                 return null;
             }
 
-            var connectionId = intent.Connection?.Id ?? intent.Sender?.Id ?? 0;
-            if (connectionId <= 0)
-            {
-                CoopPlugin.Log.LogWarning("Purchasing dropped a shipment without an authenticated "
-                    + "sender.");
-                return null;
-            }
-
-            return Process(intent, kind, lines, build, PeerLabel(connectionId));
+            var peer = string.IsNullOrWhiteSpace(intent.Peer.Name)
+                ? "Another player" : intent.Peer.Name;
+            return Process(intent, kind, lines, build, peer);
         }
 
         [MessageHandler]
@@ -512,8 +507,7 @@ namespace CardShopCoop.Modules.Purchasing
                 return ActionOutcome.Reject("purchase command is missing");
             }
 
-            message.OnApply();
-            return PublishIntentResult(context, message.Result);
+            return FinishPurchase(ApplyRestockPurchase(message));
         }
 
         [MessageHandler]
@@ -525,8 +519,7 @@ namespace CardShopCoop.Modules.Purchasing
                 return ActionOutcome.Reject("purchase command is missing");
             }
 
-            message.OnApply();
-            return PublishIntentResult(context, message.Result);
+            return FinishPurchase(ApplyFurniturePurchase(message));
         }
 
         [MessageHandler]
@@ -538,8 +531,7 @@ namespace CardShopCoop.Modules.Purchasing
                 return ActionOutcome.Reject("purchase command is missing");
             }
 
-            message.OnApply();
-            return PublishIntentResult(context, message.Result);
+            return FinishPurchase(ApplyProductLicensePurchase(message));
         }
 
         [MessageHandler]
@@ -551,28 +543,22 @@ namespace CardShopCoop.Modules.Purchasing
                 return ActionOutcome.Reject("purchase command is missing");
             }
 
-            message.OnApply();
-            return PublishIntentResult(context, message.Result);
+            return FinishPurchase(ApplyScannerLicensePurchase(message));
         }
 
-        /// <summary>The intent has already run <c>OnApply</c> and stored the host's answer.
-        /// Publish an acceptance, or let the framework's one generic rollback reverse the
-        /// client's optimistic checkout on a rejection.</summary>
-        private ActionOutcome PublishIntentResult(MessageContext context,
-            PurchaseOutcomeMessage result)
+        /// <summary>The purchase handler already applied the command. An acceptance returns the
+        /// result payload; a failure rejects with the same payload so the client can settle its
+        /// prediction against the actor-only checkout state.</summary>
+        private ActionOutcome FinishPurchase(PurchaseOutcomeMessage result)
         {
-            if (_shutdown || result == null || context?.Connection == null)
+            if (_shutdown || result == null)
             {
                 return ActionOutcome.Reject("purchasing is not ready on the host");
             }
 
-            if (!result.Success)
-            {
-                return ActionOutcome.Reject(result.Text);
-            }
-
-            SendOutcome(context.Connection.Id, result);
-            return ActionOutcome.Applied();
+            return result.Success
+                ? ActionOutcome.Applied(result)
+                : ActionOutcome.Reject(result.Text, result);
         }
 
         internal void Shutdown()
@@ -688,7 +674,7 @@ namespace CardShopCoop.Modules.Purchasing
                 }
                 if (plan.Kind == PurchaseKind.ProductLicense)
                 {
-                    if (!CatalogApi.HostPublishProductLicense(plan.Lines[0].Restock, Guid.Empty))
+                    if (!CatalogApi.HostPublishProductLicense(plan.Lines[0].Restock))
                     {
                         throw new InvalidOperationException("catalog license publication failed");
                     }
@@ -698,7 +684,7 @@ namespace CardShopCoop.Modules.Purchasing
                     CatalogApi.HostApplyProductEntitlementSideEffects(plan.Lines[0].Restock);
                 }
                 else if (plan.Kind == PurchaseKind.ScannerLicense
-                    && !CatalogApi.HostPublishScannerLicense(Guid.Empty))
+                    && !CatalogApi.HostPublishScannerLicense())
                 {
                     throw new InvalidOperationException("catalog scanner license publication failed");
                 }
@@ -1227,15 +1213,6 @@ namespace CardShopCoop.Modules.Purchasing
                 Success = false,
                 Text = "purchase rejected - " + reason,
             };
-        }
-
-        private void SendOutcome(int connectionId, PurchaseOutcomeMessage outcome)
-        {
-            if (!_shutdown)
-            {
-                RuntimeContext.Send(connectionId, outcome);
-            }
-
         }
 
         private static bool ValidProductLine(PurchaseLine line, int maxCount)

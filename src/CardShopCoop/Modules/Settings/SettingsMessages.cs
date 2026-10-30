@@ -22,23 +22,41 @@ namespace CardShopCoop.Modules.Settings
         public InteractablePlayTable Table;
         public int TableNumber;
 
-        // The client registers this prediction through the explicit Apply/Undo closures in
-        // SettingsClientBehaviour, and the host handler performs the mutation itself, so the
-        // action hooks are never the applied path.
-        public override void OnApply()
-        {
-        }
+        // The game already applied the mutation locally. These capture what an undo must restore;
+        // the host answer carries the authoritative state. Local state only, never serialized.
+        [NonSerialized]
+        public EGameEventFormat PreviousFormat;
+
+        [NonSerialized]
+        public ECardExpansionType PreviousExpansion;
+
+        [NonSerialized]
+        public float PreviousFee;
+
+        [NonSerialized]
+        public byte PreviousFlags;
+
+        [NonSerialized]
+        public int PreviousNumber;
 
         public override void OnUndo(ActionResponseMessage response)
-        {
-        }
+            => SettingsClientBehaviour.Active?.UndoOperation(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => SettingsClientBehaviour.Active?.MergeOperation(this, response);
+    }
+
+    /// <summary>The host's authoritative state after one settings operation. The framework sets
+    /// <see cref="ActionResponseMessage.Rejected"/>; the state is applied either way.</summary>
+    [NetworkMessage]
+    public sealed class SettingsOpResponse : ActionResponseMessage
+    {
+        public SettingsStateMessage State;
     }
 
     [NetworkMessage]
     public sealed class SettingsStateMessage : INetMessage
     {
-        /// <summary>The prediction this state answers, or empty for host-local state.</summary>
-        public Guid ActionId;
         public bool Full = true;
         public int Index = -1;
         // For partial fee mutations this is the price-list element. Cashier/table partials use the

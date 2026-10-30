@@ -74,7 +74,7 @@ namespace CardShopCoop.Modules.Register
         /// host-owned counter publishable during the small window before the presence roster is
         /// built.</summary>
         private PlayerRef HostSelf()
-            => ((ICoopContext)RuntimeContext)?.Self ?? new PlayerRef(0, null, true, true);
+            => Context?.Self?.Player ?? new PlayerRef(0, null, true, true);
 
         /// <summary>Reads the effective owner from the authoritative snapshot and the game's manned
         /// state. A snapshot from before the manning hook still resolves the host as the owner, and

@@ -58,9 +58,8 @@ namespace CardShopCoop.Net.Networking
     /// <summary>
     /// Opaque handle for one Connect attempt and the session it becomes, allocated by the
     /// runtime. The backend receives it in Connect and passes it back to every callback; the
-    /// runtime ignores anything addressed to an attempt it has moved past. NOT the same thing as
-    /// <see cref="PeerConnection.Id"/> (a per-peer id where 1 is the host) - this identifies the
-    /// local side's connection attempt.
+    /// runtime ignores anything addressed to an attempt it has moved past. This is NOT a
+    /// per-peer session id - this identifies the local side's connection attempt.
     /// </summary>
     public readonly struct ConnectionId : IEquatable<ConnectionId>
     {

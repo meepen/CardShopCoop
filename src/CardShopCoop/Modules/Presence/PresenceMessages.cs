@@ -9,7 +9,8 @@ using UnityEngine;
 
 namespace CardShopCoop.Modules.Presence
 {
-    /// <summary>Host roster. The host's connection ids are canonical for the session.</summary>
+    /// <summary>Host roster. <see cref="PresenceRosterEntry.Id"/> values are the host's canonical
+    /// player ids for the session; they are payload identity, never a transport handle.</summary>
     [NetworkMessage]
     public sealed class PresenceRosterMessage : INetMessage
     {
@@ -42,7 +43,9 @@ namespace CardShopCoop.Modules.Presence
     }
 
     /// <summary>Client-to-host appearance intent. The host never trusts a client id from a
-    /// payload; the transport connection supplies identity.</summary>
+    /// payload; the authenticated sender supplies identity. The client has already applied the
+    /// model locally, so this is a prediction: <see cref="OnUndo"/> restores the previous local
+    /// appearance and <see cref="OnMerge"/> applies the host's authoritative answer.</summary>
     [NetworkMessage]
     public sealed class PresenceModelRequestMessage : ActionMessage
     {
@@ -50,20 +53,30 @@ namespace CardShopCoop.Modules.Presence
         public int ModelIndex;
         public string CustomizationJson;
 
-        // The client registers this prediction through the explicit Apply/Undo closures in
-        // PresenceClientBehaviour, and the host handler applies the model itself, so the action
-        // hooks are never the applied path.
-        public override void OnApply()
-        {
-        }
+        /// <summary>The locally applied model before this change. Local undo state; never
+        /// serialized.</summary>
+        [NonSerialized]
+        public PresenceModelEntry Previous;
 
         public override void OnUndo(ActionResponseMessage response)
-        {
-        }
+            => PresenceClientBehaviour.Active?.UndoModel(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => PresenceClientBehaviour.Active?.MergeModel(this, response);
     }
 
-    /// <summary>Authoritative appearance state. Entry 0 is the host; other ids are host
-    /// connection ids, not ids supplied by the clients.</summary>
+    /// <summary>The host's authoritative appearance for the requesting player after one model
+    /// intent. Sent to the actor only; peers learn the same state through
+    /// <see cref="PresenceModelDeltaMessage"/>.</summary>
+    [NetworkMessage]
+    public sealed class PresenceModelResponseMessage : ActionResponseMessage
+    {
+        /// <summary>The host's stored appearance for the actor, or null when the host has none.</summary>
+        public PresenceModelEntry Entry;
+    }
+
+    /// <summary>Authoritative appearance state. Entry 0 is the host; other ids are the host's
+    /// canonical player ids, never ids supplied by a client.</summary>
     [NetworkMessage]
     public sealed class PresenceModelStateMessage : INetMessage
     {
@@ -78,11 +91,11 @@ namespace CardShopCoop.Modules.Presence
         public string CustomizationJson;
     }
 
+    /// <summary>Host-to-peer authoritative appearance change. The actor itself is settled by
+    /// <see cref="PresenceModelResponseMessage"/>, so this is only relayed to the other peers.</summary>
     [NetworkMessage]
     public sealed class PresenceModelDeltaMessage : INetMessage
     {
-        /// <summary>The prediction this delta answers, or empty for host-local state.</summary>
-        public Guid ActionId;
         public PresenceEntityDeltaKind Kind;
         public int Id;
         public PresenceModelEntry Entry;
@@ -104,8 +117,8 @@ namespace CardShopCoop.Modules.Presence
         public float Speed;
     }
 
-    /// <summary>Host relay of a state sample. SenderId is written by the host from its
-    /// authenticated ingress connection and is never accepted from the original client.</summary>
+    /// <summary>Host relay of a state sample. SenderId is the host's canonical player id, written
+    /// from the authenticated sender and never accepted from the original client.</summary>
     [NetworkMessage(Reliability = Reliability.Transient)]
     public sealed class PresenceRelayStateMessage : INetMessage
     {
@@ -125,8 +138,8 @@ namespace CardShopCoop.Modules.Presence
         public List<CardData> HoldCards;
     }
 
-    /// <summary>Host relay of a peer's hold appearance. SenderId is written by the host from its
-    /// authenticated ingress connection and is never accepted from the original client.</summary>
+    /// <summary>Host relay of a peer's hold appearance. SenderId is the host's canonical player
+    /// id, written from the authenticated sender and never accepted from the original client.</summary>
     [NetworkMessage]
     public sealed class PresenceRelayHoldMessage : INetMessage
     {
@@ -148,7 +161,7 @@ namespace CardShopCoop.Modules.Presence
     }
 
     /// <summary>Host-to-client visual event. SenderId is authoritative and uses the same
-    /// canonical id space as PresenceRelayStateMessage.</summary>
+    /// canonical player id space as PresenceRelayStateMessage.</summary>
     [NetworkMessage]
     public sealed class PresenceRelayTagMessage : INetMessage
     {

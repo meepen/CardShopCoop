@@ -55,7 +55,8 @@ namespace CardShopCoop.Modules.Expansion
 
             // Join catch-up is deliberately one-shot. The normal event hooks below publish
             // later authoritative changes; a failed send is not turned into a retry queue.
-            RuntimeContext.Send(connection.Id, BuildBaseline());
+            var peer = PeerHandle.ForConnection(connection);
+            peer?.Send(BuildBaseline());
         }
 
         [MessageHandler]
@@ -81,18 +82,20 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (!HostPurchase(message.Kind, context.Connection.Id, out _))
                 {
-                    return ActionOutcome.Reject("expansion purchase was refused");
+                    return ActionOutcome.Reject("expansion purchase was refused",
+                        BuildResponse(message.Kind));
                 }
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Expansion purchase failed for peer "
                     + context.Connection.Id + ": " + exception);
-                return ActionOutcome.Reject("expansion purchase failed");
+                return ActionOutcome.Reject("expansion purchase failed",
+                    BuildResponse(message.Kind));
             }
 
-            BroadcastDelta(message.Kind, message.ActionId);
-            return ActionOutcome.Applied();
+            BroadcastDelta(message.Kind, message.Peer);
+            return ActionOutcome.Applied(BuildResponse(message.Kind));
         }
 
         internal void Shutdown()
@@ -235,16 +238,28 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_CoinAmountDouble);
         }
 
-        private void BroadcastDelta(byte kind, Guid actionId)
+        private void BroadcastDelta(byte kind, ICoopPeer except = null)
         {
             if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
 
+            var message = BuildDelta(kind);
+            if (except != null)
+            {
+                Context.BroadcastExcept(except, message);
+            }
+            else
+            {
+                Context.Broadcast(message);
+            }
+        }
+
+        private static ExpansionDeltaMessage BuildDelta(byte kind)
+        {
             var message = new ExpansionDeltaMessage
             {
-                ActionId = actionId,
                 Area = kind,
             };
             switch (kind)
@@ -262,7 +277,18 @@ namespace CardShopCoop.Modules.Expansion
                     throw new InvalidOperationException("Unknown expansion delta area " + kind + ".");
             }
 
-            RuntimeContext.Broadcast(message);
+            return message;
+        }
+
+        private static ExpansionPurchaseResponse BuildResponse(byte kind)
+        {
+            var delta = BuildDelta(kind);
+            return new ExpansionPurchaseResponse
+            {
+                Area = delta.Area,
+                Count = delta.Count,
+                Unlocked = delta.Unlocked,
+            };
         }
 
         private static ExpansionBaselineMessage BuildBaseline()
@@ -286,7 +312,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(2, Guid.Empty);
+                    _active.BroadcastDelta(2);
                 }
             }
         }
@@ -299,7 +325,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(0, Guid.Empty);
+                    _active.BroadcastDelta(0);
                 }
             }
         }
@@ -312,7 +338,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(1, Guid.Empty);
+                    _active.BroadcastDelta(1);
                 }
             }
         }

@@ -34,7 +34,7 @@ namespace CardShopCoop.Modules.World
     {
         /// <summary>One in-flight binder pick waiting for the card object the game moves into the
         /// hand. Null Card3d means this pick never produced one (a binder-screen reduction).</summary>
-        private sealed class BinderTakeBinding
+        internal sealed class BinderTakeBinding
         {
             internal InteractableCard3d Card3d;
 
@@ -78,7 +78,7 @@ namespace CardShopCoop.Modules.World
         /// album row is already accounted for - the local removal changed nothing (a stale slot
         /// whose certificate left first) or another player's accepted removal consumed the same
         /// row - so neither the rollback nor a follower replay may touch the row again.</summary>
-        private sealed class GradedRemovalGuard
+        internal sealed class GradedRemovalGuard
         {
             internal Guid ActionId;
             internal bool Superseded;

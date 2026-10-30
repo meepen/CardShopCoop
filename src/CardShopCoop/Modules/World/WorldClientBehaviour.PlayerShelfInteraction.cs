@@ -1,5 +1,4 @@
 using CardShopCoop.Net;
-using CardShopCoop.Modules.Actions;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
@@ -20,25 +19,11 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleShelfItemAdd(MessageContext context, ShelfItemAddMessage message)
+        private void HandleShelfState(MessageContext context, ShelfStateMessage message)
         {
-            // Our own optimistic placement already moved the real item, so acknowledging the
-            // prediction keeps it in place instead of undoing and respawning it. Retiring it also
-            // drops it from the derived pending-add count, so later deltas no longer treat it as
-            // outstanding.
-            if (ActionLedger.IsPending(message.ActionId))
-            {
-                ActionLedger.Ack(message.ActionId);
-                return;
-            }
-
-            ApplyShelfAction(message);
-        }
-
-        [MessageHandler]
-        private void HandleShelfItemRemove(MessageContext context, ShelfItemRemoveMessage message)
-        {
-            ApplyShelfAction(message);
+            // Authoritative stock from the host, describing the compartment of the peer whose
+            // action the host just applied. Our own actions settle through their response instead.
+            _shelfInteraction?.ApplyRemoteState(message);
         }
 
         internal void ResetPlayerShelfInteractionState()
@@ -46,9 +31,17 @@ namespace CardShopCoop.Modules.World
             _shelfInteraction?.Reset();
         }
 
+        /// <summary>Re-sends an item box's current contents after an undo moved an item back out of
+        /// it, so the host's copy of the box loses the same item the refused shelf removal kept.</summary>
+        internal static void RepublishItemBoxState(InteractablePackagingBox_Item box)
+            => _instance?.PublishItemBoxState(box, true);
+
+        /// <summary>A world load or baseline complete replaced the live scene, so a prediction whose
+        /// item no longer exists cannot be reversed any more. Release exactly those; a prediction
+        /// whose item is still alive keeps owning it until the host answers.</summary>
         private void FlushPlayerShelfState()
         {
-            _shelfInteraction?.FlushClientState();
+            _shelfInteraction?.FlushStalePredictions();
         }
 
         private ShelfInteraction.LocalMutation CaptureShelfMutation(ShelfCompartment compartment,
@@ -58,7 +51,8 @@ namespace CardShopCoop.Modules.World
                 : _shelfInteraction.CaptureLocalMutation(compartment, add, itemType, item);
         }
 
-        private void PublishShelfAdd(ShelfCompartment compartment, ShelfInteraction.LocalMutation mutation)
+        private void PublishShelfAdd(ShelfCompartment compartment,
+            ShelfInteraction.LocalMutation mutation)
         {
             _shelfInteraction?.PublishAdd(compartment, mutation);
         }
@@ -85,7 +79,7 @@ namespace CardShopCoop.Modules.World
         private void PublishLabelChange(ShelfCompartment compartment, EItemType previousType,
             bool allowWarehouse = false)
         {
-            if (_shelfInteraction == null || compartment == null || !RuntimeContext.InGame()
+            if (_shelfInteraction == null || compartment == null || !Context.InGame
                 || compartment.GetItemCount() > 0
                 || compartment.GetItemType() != EItemType.None
                 || previousType == EItemType.None)
@@ -96,23 +90,7 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[shelf] label removed on " + compartment.name + " ("
                 + previousType + ").");
             _shelfInteraction.PublishRemove(compartment,
-                _shelfInteraction.CaptureLabelChange(compartment, allowWarehouse));
-        }
-
-        private bool ApplyShelfAction(IShelfMutation message)
-        {
-            if (_shelfInteraction == null)
-            {
-                return false;
-            }
-
-            // AckOrApply: the actor's optimistic add/take already moved the real item and produced
-            // the host's absolute (type, count); the host echoes that same inventory, and applying
-            // ApplyIncoming for the actor would only re-derive it (respawning generic items through
-            // ApplyState). A remote/host delta has no pending id and still applies.
-            WorldAction.AckOrApply(message,
-                () => _shelfInteraction.ApplyIncoming(message));
-            return true;
+                _shelfInteraction.CaptureLabelChange(compartment, previousType, allowWarehouse));
         }
 
         private void EnterPlayerShelfMutation()
@@ -285,22 +263,28 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(ShelfCompartment __instance, Item __result,
                 ShelfInteraction.LocalMutation __state)
             {
-                if (__result != null)
+                if (__result == null)
                 {
-                    // TakeItemToHand is the one removal whose item is only known from the result,
-                    // so attach the exact removed item here before the post-hoc prediction.
-                    __state.Removed = __result;
-                    _instance?.PublishShelfRemove(__instance, __state);
+                    return;
+                }
 
-                    // Taking an item out of an open floor box must go through the box channel:
-                    // the shelf protocol cannot address a box's contents, so without this publish
-                    // the host keeps counting the taken item.
-                    var instance = _instance;
-                    var box = instance?.FindItemBox(__instance);
-                    if (box != null)
-                    {
-                        instance.PublishItemBoxState(box, true);
-                    }
+                // TakeItemToHand is the one removal whose item is only known from the result, so
+                // attach the exact removed item here before the prediction is published.
+                if (__state.Action != null)
+                {
+                    __state.Action.Item = __result;
+                }
+
+                _instance?.PublishShelfRemove(__instance, __state);
+
+                // Taking an item out of an open floor box must go through the box channel:
+                // the shelf protocol cannot address a box's contents, so without this publish
+                // the host keeps counting the taken item.
+                var instance = _instance;
+                var box = instance?.FindItemBox(__instance);
+                if (box != null)
+                {
+                    instance.PublishItemBoxState(box, true);
                 }
             }
         }

@@ -6,10 +6,16 @@ reference; copied outside the repo it needs a `GamePath` pointing at a game inst
 plus a reference to `CardShopCoop.Api.dll` with copy-local off (never ship your own copy). It
 synchronises a shared counter:
 
-- **Client** press K → sends `SampleIncrementIntent` to the host connection.
+- **Client** press K → increments its local counter and sends the increment action
+  (`SampleIncrementIntent`) to the host.
 - **Host** press K → increments locally and broadcasts `SampleCounterState`.
-- **Host** applies a client intent, then broadcasts the authoritative value.
-- **Host** sends one baseline to each late joiner.
+- **Host** applies a client action, then answers with the counter value in the response.
+- **Client** keeps its prediction when the host accepts it, reverses it when the host refuses, and
+  merges the host's value either way.
+- **Host** sends one baseline to each peer that joins.
+
+The client sends with `Context.Send`. The host sends the join baseline to the `ICoopPeer` it receives
+in `[OnFullyJoined]`. There are no connection ids anywhere in the sample.
 
 Everything is logged with `CoopLog`, so watch `BepInEx/LogOutput.log` (or the console) to see it
 work. No UI is drawn on purpose.
@@ -19,9 +25,9 @@ work. No UI is drawn on purpose.
 | File | What it shows |
 | --- | --- |
 | `SamplePlugin.cs` | the whole dependency footprint: soft `[BepInDependency]` only |
-| `SampleCounterMessages.cs` | `[NetworkMessage]` DTOs |
-| `SampleCounterHost.cs` | `[ServerBehaviour]`, join baseline, intent handling, broadcast |
-| `SampleCounterClient.cs` | `[ClientBehaviour]`, intent send, authoritative apply |
+| `SampleCounterMessages.cs` | `[NetworkMessage]` DTOs: the action, its response, and the counter state |
+| `SampleCounterHost.cs` | `[ServerBehaviour]`, join baseline, action handling with `ActionOutcome`, broadcast |
+| `SampleCounterClient.cs` | `[ClientBehaviour]`, local prediction, action send, `OnUndo`/`OnMerge` |
 
 The packaged sample-source zip also includes `docs/third-party-integration.md`, so the downloaded
 example carries the full API guide without needing the repository checkout.
@@ -51,3 +57,6 @@ silently proceeding.
 
 Note `Private=false` on the `CardShopCoop.Api` reference: the API assembly ships with
 CardShopCoopCommunity, and shipping a second copy can load as a second assembly identity.
+
+The sample targets public API `1.0.0`, which ships with CardShopCoopCommunity 2.3.0. Rebuild the
+sample (and your own mod) when you update CardShopCoopCommunity.

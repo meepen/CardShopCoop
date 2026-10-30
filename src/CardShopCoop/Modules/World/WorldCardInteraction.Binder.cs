@@ -99,7 +99,7 @@ namespace CardShopCoop.Modules.World
             {
                 // CPlayerData.AddCard stores exactly ONE graded row per call, no matter how
                 // large addAmount is (CPlayerData.cs:1602-1611); over-counting it here would
-                // mask a genuine graded removal on the next line of the ledger.
+                // mask a genuine graded removal on the next card change in the same frame.
                 change.Added += card.cardGrade > 0 ? 1 : amount;
             }
             else

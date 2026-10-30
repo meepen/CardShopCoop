@@ -1,5 +1,4 @@
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -12,7 +11,6 @@ namespace CardShopCoop.Modules.Deodorant
     [ClientBehaviour]
     public sealed class DeodorantClientBehaviour : CoopBehaviour
     {
-        private const string PredictionScope = "deodorant.spray";
         private static DeodorantClientBehaviour _active;
         private bool _shutdown;
         private bool _initialized;
@@ -87,16 +85,13 @@ namespace CardShopCoop.Modules.Deodorant
                 return;
             }
 
-            ActionLedger.Submit(
-                PredictionScope,
-                actionId => RuntimeContext.Send(1, new HandheldSprayIntentMessage
-                {
-                    ActionId = actionId,
-                    Position = position,
-                    Content = after,
-                }),
-                () => DeodorantInterop.TrySetContent(controller, after),
-                () => DeodorantInterop.TrySetContent(controller, before));
+            Context.Send(new HandheldSprayIntentMessage
+            {
+                Position = position,
+                Content = after,
+                Controller = controller,
+                Before = before,
+            });
         }
 
         [MessageHandler]
@@ -107,49 +102,9 @@ namespace CardShopCoop.Modules.Deodorant
                 return;
             }
 
-            // The spray content is echoed verbatim, but the customer state is host-computed and the
-            // client's optimistic spray never produced it. Retire our prediction, then always apply
-            // the host state so the host-computed customers overwrite the local spray.
-            ActionLedger.Confirm(message.ActionId,
-                () => ApplyEvent(message));
-        }
-
-        private void ApplyEvent(HandheldSprayEventMessage message)
-        {
-            if (ActionLedger.IsReconciling)
-            {
-                DeodorantInterop.TrySetContent(SceneRef<InteractionPlayerController>.Get(),
-                    message.Content);
-            }
-
-            ApplyCustomers(message.Customers);
-        }
-
-        private void ApplyCustomers(System.Collections.Generic.IList<DeodorantCustomerState> states)
-        {
-            if (states == null)
-            {
-                return;
-            }
-
-            for (var i = 0; i < states.Count; i++)
-            {
-                ApplyCustomerState(states[i]);
-            }
-        }
-
-        /// <summary>Applies one host-computed smell result to the live customer the wire named.
-        /// The converter already resolved the exact pooled incarnation, so a null customer means
-        /// the entity is not live here and the entry is logged and dropped.</summary>
-        private static void ApplyCustomerState(DeodorantCustomerState state)
-        {
-            if (state?.Customer == null)
-            {
-                CoopPlugin.Log.LogWarning("[deodorant] dropped smell state with no live customer.");
-                return;
-            }
-
-            DeodorantInterop.ApplyCustomerState(state.Customer, state.IsSmelly, state.SmellyMeter);
+            // The host-computed customers overwrite the local spray result. The acting client
+            // applies the same state from the action response instead.
+            DeodorantState.ApplyCustomers(message.Customers);
         }
 
         [HarmonyPatch(typeof(InteractionPlayerController), "RaycastHoldSprayState")]

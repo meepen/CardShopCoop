@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
@@ -16,7 +15,6 @@ namespace CardShopCoop.Modules.Light
     public sealed class LightHostBehaviour : CoopBehaviour
     {
         private static LightHostBehaviour _active;
-        private readonly HashSet<int> _fullyJoined = new();
         private bool _shutdown;
         private bool _initialized;
 
@@ -62,30 +60,13 @@ namespace CardShopCoop.Modules.Light
         [OnFullyJoined]
         private void SendInitialState(PeerConnection connection)
         {
-            if (connection == null)
-            {
-                return;
-            }
-
-
-            _fullyJoined.Add(connection.Id);
-            SendState(connection.Id);
-        }
-
-        [OnClientDisconnected]
-        private void ForgetConnection(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection != null)
-            {
-                _fullyJoined.Remove(connection.Id);
-            }
-
+            SendState(PeerHandle.ForConnection(connection));
         }
 
         [MessageHandler]
-        private ActionOutcome HandleIntent(MessageContext context, LightSwitchIntentMessage message)
+        private ActionOutcome HandleIntent(CoopMessageContext context, LightSwitchIntentMessage message)
         {
-            if (!IsPeerMessage(context))
+            if (!IsPeerMessage(context) || message == null)
             {
                 return ActionOutcome.Reject("shop-light sender is not an admitted peer");
             }
@@ -95,12 +76,23 @@ namespace CardShopCoop.Modules.Light
             {
                 return ActionOutcome.Reject("shop-light scene is not ready");
             }
+
             LightSwitchState.Apply(message.IsActive);
-            BroadcastState(message.ActionId);
-            return ActionOutcome.Applied();
+            if (!LightSwitchState.TryGet(out var isActive))
+            {
+                return ActionOutcome.Applied();
+            }
+
+            var state = new LightSwitchStateMessage { IsActive = isActive };
+            if (context.Peer != null)
+            {
+                Context.BroadcastExcept(context.Peer, state);
+            }
+
+            return ActionOutcome.Applied(new LightSwitchResponse { IsActive = isActive });
         }
 
-        private void BroadcastState(Guid actionId)
+        private void BroadcastState()
         {
             if (_shutdown || !RuntimeContext.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
@@ -109,36 +101,24 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            RuntimeContext.Broadcast(new LightSwitchStateMessage
-            {
-                ActionId = actionId,
-                IsActive = isActive,
-            });
+            Context.Broadcast(new LightSwitchStateMessage { IsActive = isActive });
         }
 
-        private void SendState(int peer)
+        private void SendState(ICoopPeer peer)
         {
-            if (_shutdown || !RuntimeContext.InGame()
+            if (peer == null || _shutdown || !RuntimeContext.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
             {
                 return;
             }
 
 
-            RuntimeContext.Send(peer, new LightSwitchStateMessage
-            {
-                ActionId = Guid.Empty,
-                IsActive = isActive,
-            });
+            peer.Send(new LightSwitchStateMessage { IsActive = isActive });
         }
 
         private void SendStateToJoined()
         {
-            foreach (var peer in new List<int>(_fullyJoined))
-            {
-                SendState(peer);
-            }
-
+            BroadcastState();
         }
 
         /// <summary>Every live toggle - the physical switch click and mod-driven automation alike -
@@ -155,12 +135,12 @@ namespace CardShopCoop.Modules.Light
             }
 
             LightSwitchState.Apply(isActive);
-            BroadcastState(Guid.Empty);
+            BroadcastState();
         }
 
-        private bool IsPeerMessage(MessageContext context)
-            => !_shutdown && context?.Connection != null
-                && _fullyJoined.Contains(context.Connection.Id);
+        private bool IsPeerMessage(CoopMessageContext context)
+            => !_shutdown && context?.Peer != null && context.IsAuthenticated
+                && context.Peer.State == ConnectionState.FullyJoined;
 
         private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
             => SendStateToJoined();
@@ -185,7 +165,6 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            _fullyJoined.Clear();
         }
 
         private void OnDestroy() => Shutdown();

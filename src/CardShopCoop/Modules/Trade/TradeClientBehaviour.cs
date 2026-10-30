@@ -1,12 +1,13 @@
 using System;
+using CardShopCoop.Api;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Npc;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -30,7 +31,7 @@ namespace CardShopCoop.Modules.Trade
             public bool RemovedByHost;
         }
 
-        private sealed class PredictionFrame
+        internal sealed class PredictionFrame
         {
             public TradeIntentOperation Operation;
             public TradeOfferState State;
@@ -61,9 +62,9 @@ namespace CardShopCoop.Modules.Trade
         }
 
         /// <summary>The card/coin movement a completed accept produced, captured before vanilla
-        /// so the trade prediction can replay (<see cref="ApplyPrediction"/>) and reverse
-        /// (<see cref="UndoPrediction"/>) it. Null for a kept or walked-away outcome.</summary>
-        private sealed class AcceptEffect
+        /// so the trade prediction can reverse (<see cref="UndoPrediction"/>) it. Null for a kept
+        /// or walked-away outcome.</summary>
+        internal sealed class AcceptEffect
         {
             public CardData Received;
             public CardData Given;
@@ -77,8 +78,6 @@ namespace CardShopCoop.Modules.Trade
             public TradeOutcome Outcome;
             public TradeOfferState State;
         }
-
-        private const string PredictionScope = "trade";
 
         private static TradeClientBehaviour _active;
         private readonly Dictionary<InteractableCashierCounter, LocalOffer> _offers = new();
@@ -149,11 +148,6 @@ namespace CardShopCoop.Modules.Trade
 
         private void ClearPendingDeltas()
         {
-            foreach (var delta in _pendingDeltas.Values)
-            {
-                ActionLedger.Ack(delta.ActionId);
-            }
-
             _pendingDeltas.Clear();
         }
 
@@ -199,14 +193,12 @@ namespace CardShopCoop.Modules.Trade
             if (message == null || message.Counter == null)
             {
                 CoopPlugin.Log.LogWarning("[trade] client dropped offer delta with no live counter.");
-                ActionLedger.Ack(message?.ActionId ?? Guid.Empty);
                 return;
             }
 
             if (!message.Removed && message.Offer == null)
             {
                 CoopPlugin.Log.LogWarning("[trade] client dropped kept offer delta with no state.");
-                ActionLedger.Ack(message.ActionId);
                 return;
             }
 
@@ -280,11 +272,6 @@ namespace CardShopCoop.Modules.Trade
 
         private void DeferDelta(TradeOfferDeltaMessage message)
         {
-            if (_pendingDeltas.TryGetValue(message.Counter, out var previous))
-            {
-                ActionLedger.Ack(previous.ActionId);
-            }
-
             _pendingDeltas[message.Counter] = message;
         }
 
@@ -384,17 +371,16 @@ namespace CardShopCoop.Modules.Trade
 
         private void ApplyOfferDelta(TradeOfferDeltaMessage message)
         {
-            // Confirm retires the actor's own pending prediction AND always folds the host's
-            // authoritative delta: the delta must run even when it confirms our own prediction, or
-            // _awaitingPrediction (and the terminal flags) would stay set for a kept outcome and
-            // refuse the next Accept/Decline/Think locally. A remote or host-local delta takes the
-            // same apply path.
-            ActionLedger.Confirm(message.ActionId,
-                () => ApplyOfferDeltaAuthoritative(message));
+            ApplyOfferDeltaAuthoritative(message);
         }
 
         private void ApplyOfferDeltaAuthoritative(TradeOfferDeltaMessage message)
         {
+            if (message?.Counter == null)
+            {
+                return;
+            }
+
             if (message.Removed)
             {
                 if (!_offers.TryGetValue(message.Counter, out var removedOffer))
@@ -671,25 +657,42 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        [MessageHandler]
-        private void HandleSession(MessageContext context, TradeSessionMessage message)
+        /// <summary>Applies the host's answer for one predicted trade action. A session acceptance
+        /// folds the claim; an offer result always applies the host's authoritative delta, even for
+        /// a kept outcome, so the optimistic flags clear.</summary>
+        internal void MergePrediction(PredictionFrame frame, ActionResponseMessage response)
         {
-            CoopPlugin.Log.LogInfo("[trade] client session counter="
-                + (message.Counter == null ? "null" : message.Counter.name) + " customer="
-                + (message.Customer == null ? "null" : message.Customer.name) + " gen="
-                + message.CustomerGeneration + " nonce=" + message.OfferNonce + " accepted="
-                + message.Accepted + " id=" + message.ActionId + ".");
-            // AckOrApply: the only state this folds is _claimAccepted, which BeginSession already
-            // set optimistically for the actor (and the host only ever sends Accepted=true, with
-            // refusals arriving as a separate rollback), so retiring without replaying is correct.
-            // A remote peer's session has no pending id and still applies the claim.
-            ActionLedger.AckOrApply(message.ActionId, () =>
+            switch (response)
             {
-                if (message.Accepted)
-                {
-                    _claimAccepted = true;
-                }
-            });
+                case TradeSessionResponse session:
+                    if (session.Accepted)
+                    {
+                        _claimAccepted = true;
+                    }
+
+                    return;
+                case TradeOfferResponse offer:
+                    if (offer.Counter == null)
+                    {
+                        return;
+                    }
+
+                    var delta = new TradeOfferDeltaMessage
+                    {
+                        Counter = offer.Counter,
+                        Outcome = offer.Outcome,
+                        Removed = offer.Removed,
+                        Offer = offer.Offer,
+                    };
+                    if (!RuntimeContext.InGame() || !IsTradeSceneReady())
+                    {
+                        DeferDelta(delta);
+                        return;
+                    }
+
+                    ApplyOfferDeltaAuthoritative(delta);
+                    return;
+            }
         }
 
         private LocalOffer PendingOffer()
@@ -733,12 +736,11 @@ namespace CardShopCoop.Modules.Trade
         }
 
         /// <summary>Records one trade intent the game already performed (Open), so the prediction
-        /// only stores the replay/undo closures and never mutates anything now.</summary>
+        /// only stores the reversal and never mutates anything now.</summary>
         private bool PredictIntentObserved(TradeIntentOperation operation, float price)
-            => RegisterIntent(operation, price, ActionLedger.Submit);
+            => RegisterIntent(operation, price);
 
-        private bool RegisterIntent(TradeIntentOperation operation, float price,
-            Func<string, Action<Guid>, Action, Action, Guid> register)
+        private bool RegisterIntent(TradeIntentOperation operation, float price)
         {
             var offer = PendingOffer();
             if (!RuntimeContext.InGame() || offer?.State == null || _pendingCounter == null)
@@ -753,10 +755,7 @@ namespace CardShopCoop.Modules.Trade
             }
 
             var frame = CapturePredictionFrame(offer, operation);
-            register(PredictionScope,
-                actionId => SendIntent(actionId, operation, price, offer.State),
-                () => ApplyPrediction(operation),
-                () => UndoPrediction(frame));
+            SendIntent(operation, price, offer.State, frame);
             return true;
         }
 
@@ -814,19 +813,12 @@ namespace CardShopCoop.Modules.Trade
                 capture.Frame.Effect = result.Outcome == TradeOutcome.Accepted
                     ? BuildAcceptEffect(capture)
                     : null;
-                ActionLedger.Submit(PredictionScope,
-                    actionId => SendIntent(actionId, capture.Operation, capture.Price,
-                        capture.State, result.Outcome, result.State, capture.Frame.Effect),
-                    () => ApplyPrediction(capture.Operation, capture.Frame.Effect),
-                    () => UndoPrediction(capture.Frame));
+                SendIntent(capture.Operation, capture.Price, capture.State, capture.Frame,
+                    result.Outcome, result.State, capture.Frame.Effect);
                 return;
             }
 
-            ActionLedger.Submit(PredictionScope,
-                actionId => SendIntent(actionId, capture.Operation, capture.Price,
-                    capture.State),
-                () => ApplyPrediction(capture.Operation),
-                () => UndoPrediction(capture.Frame));
+            SendIntent(capture.Operation, capture.Price, capture.State, capture.Frame);
         }
 
         /// <summary>The card/coin movement a completed accept performed. Vanilla already applied
@@ -929,18 +921,22 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        private void SendIntent(Guid actionId, TradeIntentOperation operation, float price,
-            TradeOfferState state, TradeOutcome result = TradeOutcome.None,
+        private void SendIntent(TradeIntentOperation operation, float price,
+            TradeOfferState state, PredictionFrame frame, TradeOutcome result = TradeOutcome.None,
             TradeOfferState resultState = null, AcceptEffect effect = null)
         {
             CoopPlugin.Log.LogInfo("[trade] client intent " + operation + " counter="
                 + (state.Counter == null ? "null" : state.Counter.name) + " customer="
                 + (state.Customer == null ? "null" : state.Customer.name) + " gen="
                 + state.CustomerGeneration + " nonce=" + state.OfferNonce + " price="
-                + price.ToString("F2") + " result=" + result + " id=" + actionId + ".");
-            RuntimeContext.Send(1, new TradeIntentMessage
+                + price.ToString("F2") + " result=" + result + ".");
+            if (Context?.Host == null)
             {
-                ActionId = actionId,
+                throw new InvalidOperationException("Cannot send a trade intent without a host.");
+            }
+
+            Context.Send(new TradeIntentMessage
+            {
                 Operation = operation,
                 Counter = state.Counter,
                 Customer = state.Customer,
@@ -952,6 +948,8 @@ namespace CardShopCoop.Modules.Trade
                 CardReceived = effect?.Received,
                 CardRemoved = effect?.Given,
                 CoinSpent = effect?.CoinSpent ?? 0f,
+                Client = this,
+                Frame = frame,
             });
         }
 
@@ -967,65 +965,6 @@ namespace CardShopCoop.Modules.Trade
                 AcceptedShown = _acceptedShown,
                 ScreenOpen = TradeInterop.IsScreenOpen(TradeInterop.Screen),
             };
-
-        private void ApplyPrediction(TradeIntentOperation operation, AcceptEffect effect = null)
-        {
-            switch (operation)
-            {
-                case TradeIntentOperation.Open:
-                    _claimAccepted = true;
-                    break;
-                case TradeIntentOperation.Accept:
-                    _awaitingPrediction = true;
-                    _terminalSent = true;
-                    _acceptedShown = true;
-                    TradeInterop.ShowAccepted(TradeInterop.Screen);
-                    break;
-                case TradeIntentOperation.Decline:
-                    _awaitingPrediction = true;
-                    _terminalSent = true;
-                    ClosePredictedScreen();
-                    break;
-                case TradeIntentOperation.Think:
-                    _awaitingPrediction = true;
-                    _claimAccepted = false;
-                    _thinkingSent = true;
-                    ClosePredictedScreen();
-                    break;
-            }
-
-            if (effect != null)
-            {
-                ApplyAcceptEffect(effect);
-            }
-        }
-
-        /// <summary>Replays the card/coin movement of an accepted trade through the game's own
-        /// methods. Used only after an earlier prediction on the key was undone; the card helper
-        /// sets the remote-apply guard so the observer does not forward a second time, and the
-        /// wallet event is skipped by the Hud observer while reconciliation is running.</summary>
-        private static void ApplyAcceptEffect(AcceptEffect effect)
-        {
-            if (effect.Received != null)
-            {
-                WorldCardInteraction.ApplyPredictedCardDelta(effect.Received, 1, true);
-            }
-
-            if (effect.Given != null)
-            {
-                WorldCardInteraction.ApplyPredictedCardDelta(effect.Given, 1, false);
-            }
-
-            if (effect.CoinSpent > 0f)
-            {
-                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(effect.CoinSpent));
-            }
-
-            if (effect.Received != null || effect.Given != null)
-            {
-                WorldClientBehaviour.ActiveCards?.NotifyCardsChanged();
-            }
-        }
 
         /// <summary>Reverses the card/coin movement of an accepted trade, newest mutation first.</summary>
         private static void UndoAcceptEffect(AcceptEffect effect)
@@ -1051,7 +990,7 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        private void UndoPrediction(PredictionFrame frame)
+        internal void UndoPrediction(PredictionFrame frame)
         {
             CoopPlugin.Log.LogInfo("[trade] client undo " + frame.Operation + " state="
                 + (frame.State == null ? "<null>" : frame.State.Counter.ToString())
@@ -1187,7 +1126,7 @@ namespace CardShopCoop.Modules.Trade
                 // and never resolves or rejects it, so there is no authoritative state to roll back
                 // and no prediction is registered (a registered one could never be retired). The
                 // non-empty id only satisfies the host's sender validation.
-                SendIntent(Guid.NewGuid(), TradeIntentOperation.Close, 0f, offer.State);
+                SendIntent(TradeIntentOperation.Close, 0f, offer.State, null);
             }
 
             _stopHandled = true;

@@ -4,66 +4,54 @@ using CardShopCoop.Net;
 namespace CardShopCoop.Api
 {
     /// <summary>
-    /// A client command. The host runs <see cref="OnApply"/> (or the handler reports that it
-    /// already applied the command), then answers with an optional <see cref="ActionResponseMessage"/>.
-    /// The client replays <see cref="OnApply"/> during reconciliation and reverses it with
-    /// <see cref="OnUndo"/> when the host rejects the command.
+    /// A predicted, validated, undoable world interaction. The client applies the prediction
+    /// locally, sends the action through <see cref="ICoopContext"/> (or <see cref="ICoopPeer.Send"/>),
+    /// and the host validates it and answers with an optional <see cref="ActionResponseMessage"/>.
     ///
-    /// A plain one-way message is an <see cref="INetMessage"/>. An ActionMessage is always
-    /// ledgered, so handlers for it must return <see cref="ActionOutcome"/>.
+    /// The framework calls <see cref="OnUndo"/> only when the host rejects the prediction, then
+    /// calls <see cref="OnMerge"/> exactly once on every resolution - after <see cref="OnUndo"/>
+    /// when rejected. <see cref="OnMerge"/> is where the authoritative state in the response is
+    /// applied and local artifacts are cleaned up.
+    ///
+    /// A plain, non-predicted notification or continuous state update is an
+    /// <see cref="INetMessage"/> instead.
     /// </summary>
     public abstract class ActionMessage : INetMessage
     {
-        /// <summary>Correlation for the host's authoritative response. The framework fills this
-        /// in; a module never sets it.</summary>
+        /// <summary>Correlation for the host's response. Filled by the framework; a client must
+        /// leave this empty when sending, and a pre-set value is overwritten.</summary>
         public Guid ActionId
         {
             get; set;
         }
 
-        /// <summary>Optional local-only grouping key for the action ledger. Two commands with the
-        /// same key are reconciled as an ordered chain. Leave this null to use the action's live
-        /// entity fields, or set a unique value when several independent commands of the same type
-        /// may be in flight at once. Never serialized.</summary>
+        /// <summary>The sender, filled by the framework on the host before the handler runs. Null
+        /// on a client and outside dispatch. Never serialized: the sender comes from the
+        /// authenticated connection, not the payload.</summary>
         [NonSerialized]
-        public string ActionKey;
+        public ICoopPeer Peer;
 
-        /// <summary>The authenticated player whose action the host is applying, filled by the
-        /// framework before the host handler runs. Null on a client and outside dispatch. Never
-        /// serialized: the sender comes from the connection, not the payload.</summary>
-        [NonSerialized]
-        public PlayerRef Sender;
-
-        /// <summary>The transport view of <see cref="Sender"/> (state, name), filled by the
-        /// framework before the host handler runs. Null on a client and outside dispatch.</summary>
-        [NonSerialized]
-        public Net.Connection.PeerConnection Connection;
-
-        /// <summary>Runs on the host when the handler returns <see cref="ActionOutcome.Apply"/>,
-        /// and on the client when a rejected action's newer neighbours are replayed. The client
-        /// performs its initial local prediction before sending; this is not called on send.
-        /// The default is a no-op: a handler that applies the command itself returns
-        /// <see cref="ActionOutcome.Applied"/> and does not need to override this.</summary>
-        public virtual void OnApply()
-        {
-        }
-
-        /// <summary>Reverses this action's local prediction when the host rejects it. The default
-        /// is a no-op; an action that predicts locally must override it.</summary>
+        /// <summary>Client: reverse this action's local prediction when the host rejects it. Do
+        /// not apply authoritative state here; <see cref="OnMerge"/> does that. The default is a
+        /// no-op.</summary>
         public virtual void OnUndo(ActionResponseMessage response)
         {
         }
 
-        /// <summary>Merges an accepted authoritative response into this action's local state.
-        /// Only called for an accepted response; rejections use <see cref="OnUndo"/>.</summary>
+        /// <summary>Client: apply the authoritative state carried by the response and settle this
+        /// action. Called exactly once on every resolution, after <see cref="OnUndo"/> when
+        /// rejected. Also the cleanup point for local artifacts. The default is a no-op.</summary>
         public virtual void OnMerge(ActionResponseMessage response)
         {
         }
     }
 
-    /// <summary>An authoritative extended-information value that answers one
-    /// <see cref="ActionMessage"/>. The framework applies it around the module's information
-    /// handler in action order; the value itself is otherwise normal data.</summary>
+    /// <summary>
+    /// A replicated extended-information value that carries the authoritative state for an
+    /// action. The framework applies the value through the extended-information handler, then
+    /// calls <see cref="ActionMessage.OnMerge"/> with a null response, so the value is the merge
+    /// state. The value itself is otherwise normal extended-information data.
+    /// </summary>
     public interface IActionValue
     {
         Guid ActionId

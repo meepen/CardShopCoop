@@ -28,8 +28,8 @@ namespace CardShopCoop.Modules.Pricing
 
         private static PricingHostBehaviour _active;
         private readonly Dictionary<string, OwnedCardState> _cards = new(StringComparer.Ordinal);
-        private readonly HashSet<int> _joined = new();
-        private readonly HashSet<int> _baselinePending = new();
+        private readonly HashSet<ICoopPeer> _joined = new();
+        private readonly HashSet<ICoopPeer> _baselinePending = new();
         private bool _shutdown;
         private bool _initialized;
         private bool _applying;
@@ -78,18 +78,19 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         [OnFullyJoined]
-        private void SendJoinState(PeerConnection peer)
+        private void SendJoinState(PeerConnection connection)
         {
+            var peer = PeerHandle.ForConnection(connection);
             if (peer == null)
             {
                 return;
             }
 
 
-            _joined.Add(peer.Id);
-            if (!SendBaseline(peer.Id))
+            _joined.Add(peer);
+            if (!SendBaseline(peer))
             {
-                _baselinePending.Add(peer.Id);
+                _baselinePending.Add(peer);
             }
 
         }
@@ -101,28 +102,28 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         [OnClientDisconnected]
-        private void ForgetPeer(PeerConnection peer, DisconnectInfo _)
+        private void ForgetPeer(PeerConnection connection, DisconnectInfo _)
         {
+            var peer = PeerHandle.ForConnection(connection);
             if (peer == null)
             {
                 return;
             }
 
 
-            _joined.Remove(peer.Id);
-            _baselinePending.Remove(peer.Id);
+            _joined.Remove(peer);
+            _baselinePending.Remove(peer);
         }
 
         [MessageHandler]
-        private ActionOutcome Item(MessageContext context, PricingItemIntentMessage message)
+        private ActionOutcome Item(CoopMessageContext context, PricingItemIntentMessage message)
         {
             if (message == null)
             {
                 return ActionOutcome.Reject("pricing command is missing");
             }
 
-            message.OnApply();
-            if (_shutdown || context?.Connection == null)
+            if (_shutdown || context?.Peer == null)
             {
                 return ActionOutcome.Reject("pricing session is not active");
             }
@@ -130,28 +131,31 @@ namespace CardShopCoop.Modules.Pricing
             if (!PricingInterop.IsItemTypeValid(message.ItemType)
                 || !PricingInterop.ValidPrice(message.Price))
             {
-                return ActionOutcome.Reject("item price is invalid");
+                return RejectItem(message, "item price is invalid");
             }
 
             if (!TrySetItem(message.ItemType, message.Price, out var actual))
             {
-                return ActionOutcome.Reject("the item price could not be set");
+                return RejectItem(message, "the item price could not be set");
             }
 
-            QueueItemDelta(message.ActionId, message.ItemType, actual);
-            return ActionOutcome.Applied();
+            QueueItemDelta(message.ItemType, actual);
+            return ActionOutcome.Applied(new PricingItemResponse
+            {
+                ItemType = message.ItemType,
+                Price = actual,
+            });
         }
 
         [MessageHandler]
-        private ActionOutcome Card(MessageContext context, PricingCardIntentMessage message)
+        private ActionOutcome Card(CoopMessageContext context, PricingCardIntentMessage message)
         {
             if (message == null)
             {
                 return ActionOutcome.Reject("pricing command is missing");
             }
 
-            message.OnApply();
-            if (_shutdown || context?.Connection == null)
+            if (_shutdown || context?.Peer == null)
             {
                 return ActionOutcome.Reject("pricing session is not active");
             }
@@ -164,13 +168,13 @@ namespace CardShopCoop.Modules.Pricing
                     + (message.Card == null ? "null" : Describe(message.Card))
                     + " valid=" + (message.Card != null && PricingInterop.ValidCard(message.Card))
                     + " price=" + message.Price + " grade=" + message.EncodedGrade + ".");
-                return ActionOutcome.Reject("card price intent is invalid");
+                return RejectCard(message, "card price intent is invalid");
             }
 
             if (message.Shelf == null)
             {
                 CoopPlugin.Log.LogWarning("[pricing] dropped card intent with no live display shelf.");
-                return ActionOutcome.Reject("card price intent has no live display shelf");
+                return RejectCard(message, "card price intent has no live display shelf");
             }
 
             var key = PricingInterop.CardKey(message.Card, message.EncodedGrade);
@@ -183,7 +187,7 @@ namespace CardShopCoop.Modules.Pricing
                     + " shelf=" + message.Shelf.name + " compartment=" + message.Compartment
                     + " card=" + Describe(message.Card) + " key=" + (key ?? "null") + " grade="
                     + message.EncodedGrade + ".");
-                return ActionOutcome.Reject("the priced card is not the displayed card");
+                return RejectCard(message, "the priced card is not the displayed card");
             }
 
             var displayed = WorldCardDisplay.Read(compartment);
@@ -197,13 +201,57 @@ namespace CardShopCoop.Modules.Pricing
                         : GradingApi.Encoded(canonical)) + " requestedPrice=" + message.Price
                     + " actualPrice=" + (canonical == null ? -1f : PricingInterop.ReadCard(canonical))
                     + ".");
-                return ActionOutcome.Reject("the card price could not be set");
+                return RejectCard(message, "the card price could not be set");
             }
 
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
-            QueueCardDelta(message.ActionId, canonical, actual, false);
-            return ActionOutcome.Applied();
+            QueueCardDelta(canonical, actual, false);
+            return ActionOutcome.Applied(new PricingCardResponse
+            {
+                Card = PricingInterop.CopyCard(canonical, GradingApi.Encoded(canonical)),
+                EncodedGrade = GradingApi.Encoded(canonical),
+                Price = actual,
+            });
+        }
+
+        /// <summary>Answers a refused item intent with the host's current price for that item, or
+        /// an explicit "no value" marker when the item type itself is unusable here.</summary>
+        private static ActionOutcome RejectItem(PricingItemIntentMessage message, string reason)
+        {
+            var price = PricingInterop.IsItemTypeValid(message.ItemType)
+                ? PricingInterop.ReadItem(message.ItemType)
+                : float.NaN;
+            return ActionOutcome.Reject(reason, new PricingItemResponse
+            {
+                ItemType = message.ItemType,
+                Price = price,
+            });
+        }
+
+        /// <summary>Answers a refused card intent with the host's current price for that card when
+        /// it is a card the host knows, otherwise with no value (the client's undo stands).</summary>
+        private static ActionOutcome RejectCard(PricingCardIntentMessage message, string reason)
+        {
+            var card = message.Card;
+            var grade = message.EncodedGrade;
+            if (card == null || !PricingInterop.ValidCard(card))
+            {
+                return ActionOutcome.Reject(reason);
+            }
+
+            var canonical = PricingInterop.CopyCard(card, grade);
+            if (canonical == null)
+            {
+                return ActionOutcome.Reject(reason);
+            }
+
+            return ActionOutcome.Reject(reason, new PricingCardResponse
+            {
+                Card = canonical,
+                EncodedGrade = grade,
+                Price = PricingInterop.ReadCard(canonical),
+            });
         }
 
         private static string Describe(CardData card)
@@ -243,7 +291,7 @@ namespace CardShopCoop.Modules.Pricing
 
             var actual = PricingInterop.ReadItem(type);
             PricingDisplay.SetItem(type, actual);
-            QueueItemDelta(Guid.Empty, type, actual);
+            QueueItemDelta(type, actual);
         }
 
         private void CaptureCardSetterLocal(CardData card, float requestedPrice)
@@ -271,7 +319,7 @@ namespace CardShopCoop.Modules.Pricing
                 Price = price,
             };
             PricingDisplay.SetCard(canonical, grade, price);
-            QueueCardDelta(Guid.Empty, canonical, price, false);
+            QueueCardDelta(canonical, price, false);
         }
 
         private void ObserveInventoryMutation(CardData card)
@@ -298,7 +346,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 _cards.Remove(key);
                 PricingDisplay.RemoveCard(canonical, grade);
-                QueueCardDelta(Guid.Empty, canonical, 0f, true);
+                QueueCardDelta(canonical, 0f, true);
             }
             else
             {
@@ -309,7 +357,7 @@ namespace CardShopCoop.Modules.Pricing
                     Price = price,
                 };
                 PricingDisplay.SetCard(canonical, grade, price);
-                QueueCardDelta(Guid.Empty, canonical, price, false);
+                QueueCardDelta(canonical, price, false);
             }
         }
 
@@ -364,42 +412,42 @@ namespace CardShopCoop.Modules.Pricing
             return state;
         }
 
-        private bool SendBaseline(int connectionId)
+        private bool SendBaseline(ICoopPeer peer)
         {
-            if (_shutdown || !RuntimeContext.InGame() || PricingInterop.ItemCount == 0
-                || WorldCardInteraction.Inv() == null)
+            if (peer == null || _shutdown || !RuntimeContext.InGame()
+                || PricingInterop.ItemCount == 0 || WorldCardInteraction.Inv() == null)
             {
 
                 return false;
             }
 
 
-            Util.MemoryProbe.Log("pricing-baseline:before conn=" + connectionId);
+            Util.MemoryProbe.Log("pricing-baseline:before peer=" + peer.Name);
             HydrateOwnedCards();
             var state = BuildState();
-            Util.MemoryProbe.Log("pricing-baseline:after conn=" + connectionId
+            Util.MemoryProbe.Log("pricing-baseline:after peer=" + peer.Name
                 + " items=" + state.ItemTypes.Count + " cards=" + state.Cards.Count);
-            RuntimeContext.Send(connectionId, state);
-            _baselinePending.Remove(connectionId);
+            peer.Send(state);
+            _baselinePending.Remove(peer);
             return true;
         }
 
         private void SendPendingBaselines()
         {
-            foreach (var connectionId in new List<int>(_baselinePending))
+            foreach (var peer in new List<ICoopPeer>(_baselinePending))
             {
-                if (!_joined.Contains(connectionId))
+                if (!_joined.Contains(peer))
                 {
-                    _baselinePending.Remove(connectionId);
+                    _baselinePending.Remove(peer);
                     continue;
                 }
-                SendBaseline(connectionId);
+                SendBaseline(peer);
             }
         }
 
         /// <summary>Queues one item price change for this frame's batch. Queuing instead of
         /// sending keeps a mass price pass to one message per frame per peer.</summary>
-        private void QueueItemDelta(Guid actionId, EItemType type, float price)
+        private void QueueItemDelta(EItemType type, float price)
         {
             if (_shutdown || RuntimeContext.InGame() != true)
             {
@@ -409,7 +457,6 @@ namespace CardShopCoop.Modules.Pricing
 
             _pendingItemDeltas.Add(new PricingItemDeltaEntry
             {
-                ActionId = actionId,
                 ItemType = type,
                 Price = price,
             });
@@ -417,7 +464,7 @@ namespace CardShopCoop.Modules.Pricing
 
         /// <summary>Queues one card price change for this frame's batch. The card is snapshotted
         /// here, while it is still the caller's live object.</summary>
-        private void QueueCardDelta(Guid actionId, CardData card, float price, bool removed)
+        private void QueueCardDelta(CardData card, float price, bool removed)
         {
             if (_shutdown || RuntimeContext.InGame() != true)
             {
@@ -427,7 +474,6 @@ namespace CardShopCoop.Modules.Pricing
 
             _pendingCardDeltas.Add(new PricingCardDeltaEntry
             {
-                ActionId = actionId,
                 Card = PricingInterop.CopyCard(card, GradingApi.Encoded(card)),
                 Price = price,
                 EncodedGrade = GradingApi.Encoded(card),
@@ -435,8 +481,8 @@ namespace CardShopCoop.Modules.Pricing
             });
         }
 
-        /// <summary>Sends everything queued this frame in capped batches, preserving entry order
-        /// and per-entry prediction ids. Chunking mirrors the card batch: a mass reprice must not
+        /// <summary>Sends everything queued this frame in capped batches, preserving entry order.
+        /// Chunking mirrors the card batch: a mass reprice must not
         /// stall a client frame (the dispatch budget charges the batch by entry count) or exceed
         /// the encoded frame limit. A world change or shutdown drops the queue instead of
         /// replaying stale prices into the next world.</summary>
@@ -453,7 +499,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 var count = Math.Min(PricingDeltaBatchMax, _pendingItemDeltas.Count);
                 var chunk = _pendingItemDeltas.GetRange(0, count);
-                RuntimeContext.Broadcast(new PricingDeltaBatchMessage { Items = chunk });
+                Context.Broadcast(new PricingDeltaBatchMessage { Items = chunk });
                 _pendingItemDeltas.RemoveRange(0, count);
             }
 
@@ -461,7 +507,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 var count = Math.Min(PricingDeltaBatchMax, _pendingCardDeltas.Count);
                 var chunk = _pendingCardDeltas.GetRange(0, count);
-                RuntimeContext.Broadcast(new PricingDeltaBatchMessage { Cards = chunk });
+                Context.Broadcast(new PricingDeltaBatchMessage { Cards = chunk });
                 _pendingCardDeltas.RemoveRange(0, count);
             }
         }

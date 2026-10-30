@@ -1,6 +1,5 @@
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -15,8 +14,6 @@ namespace CardShopCoop.Modules.StoreAccess
     {
         private const byte ShopSign = 0;
         private const byte WarehouseSign = 1;
-        private const string ShopKey = "store-access:shop";
-        private const string WarehouseKey = "store-access:warehouse";
 
         private static StoreAccessClientBehaviour _active;
         private bool _shutdown;
@@ -55,10 +52,9 @@ namespace CardShopCoop.Modules.StoreAccess
         }
 
         /// <summary>The host's authoritative access flags. The store owns the baseline and the
-        /// wire; this handler only projects the value onto the local game state and signs. Because
-        /// the value implements <see cref="IActionValue"/>, the framework wraps this handler in
-        /// <see cref="ActionLedger"/> so a pending local toggle is retired on an accepted echo or
-        /// undone before a rejection re-anchor is applied.</summary>
+        /// wire; this handler only projects the value onto the local game state and signs. The
+        /// value implements <see cref="IActionValue"/>, so a pending local toggle is reversed on a
+        /// rejection before this authoritative re-anchor is applied.</summary>
         [GlobalInformationHandler]
         private void HandleState(InformationChange<StoreAccessState> change)
         {
@@ -172,7 +168,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 return true;
             }
 
-            var host = ((ICoopContext)RuntimeContext).HostConnection;
+            var host = Context?.Host;
             if (host != null && host.State != ConnectionState.FullyJoined)
             {
                 CoopPlugin.Log.LogInfo("[store-access] sign click ignored: host connection is "
@@ -207,40 +203,21 @@ namespace CardShopCoop.Modules.StoreAccess
             // No join callback: the guest's own connection to the host is the authoritative
             // "gameplay traffic is allowed" signal. Before the FullyJoined ack the sign cannot
             // drive a shared state change anyway.
-            var host = ((ICoopContext)RuntimeContext).HostConnection;
+            var host = Context?.Host;
             if (host == null || host.State != ConnectionState.FullyJoined)
             {
                 return;
             }
 
-            // One ledger key per sign so an undo of one sign's toggle never touches the other.
-            var key = which == ShopSign ? ShopKey : WarehouseKey;
-            ActionLedger.Submit(
-                key,
-                actionId => RuntimeContext.Send(host.Id, new StoreAccessToggleIntent
-                {
-                    ActionId = actionId,
-                    Which = which,
-                }),
-                () => ToggleLocal(which),
-                () => ToggleLocal(which));
-        }
-
-        /// <summary>Flips one access flag and repaints its sign. Both directions of a toggle
-        /// prediction use this: the host's intent is a toggle too, so this is the exact redo and
-        /// the exact inverse.</summary>
-        private static void ToggleLocal(byte which)
-        {
-            if (which == ShopSign)
+            Context.Send(new StoreAccessToggleIntent
             {
-                ApplyLocal(ShopSign, !CPlayerData.m_IsShopOpen);
-                return;
-            }
-
-            ApplyLocal(WarehouseSign, !CPlayerData.m_IsWarehouseDoorClosed);
+                Which = which,
+                Before = before,
+            });
         }
 
-        private static void ApplyLocal(byte which, bool value)
+        /// <summary>Flips one access flag and repaints its sign.</summary>
+        internal static void ApplyLocal(byte which, bool value)
         {
             if (which == ShopSign)
             {

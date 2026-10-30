@@ -35,9 +35,7 @@ namespace CardShopCoop.Modules.World
         private readonly PlacementTransferSlots _placementSlots = new();
         private readonly Dictionary<InteractableObject, PlacementEntitySnapshot> _known =
             new(PlacementObjectComparer.Instance);
-        private readonly HashSet<int> _fullyJoined = new();
         private int _applyingIntent;
-        private Guid _nextMutationPrediction;
 
         /// <summary>How far a settling player may be from the object they move. Vanilla only lets
         /// the mover settle an object that is right in front of them, so this is a generous bound
@@ -59,7 +57,6 @@ namespace CardShopCoop.Modules.World
         {
             SceneManager.sceneLoaded -= OnPlacementSceneLoaded;
             _known.Clear();
-            _fullyJoined.Clear();
         }
 
         [OnFullyJoined]
@@ -70,36 +67,25 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _fullyJoined.Add(connection.Id);
-            SendBaseline(connection.Id);
+            SendBaseline(PeerHandle.ForConnection(connection));
         }
 
         /// <summary>Answers a fully-connected guest's request for one more state baseline. This is
-        /// deliberately per-connection: only the requester is re-sent, never the other players.
-        /// A fresh baseline is built from the host's current live lists, so objects the guest's
-        /// scene finished spawning after the join baseline are posed on this pass.</summary>
+        /// deliberately per-peer: only the requester is re-sent, never the other players. A fresh
+        /// baseline is built from the host's current live lists, so objects the guest's scene
+        /// finished spawning after the join baseline are posed on this pass.</summary>
         [MessageHandler]
-        private void HandlePlacementBaselineRequest(MessageContext context,
+        private void HandlePlacementBaselineRequest(CoopMessageContext context,
             PlacementBaselineRequestMessage message)
         {
-            if (_shutdown || context?.Connection == null
-                || !IsJoinPhase(context.Connection.State))
+            if (_shutdown || context?.Peer == null || !context.IsAuthenticated)
             {
                 return;
             }
 
-            CoopPlugin.Log.LogInfo("[placement] re-sending state baseline to connection "
-                + context.ConnectionId + " on request.");
-            SendBaseline(context.Connection.Id);
-        }
-
-        [OnClientDisconnected]
-        private void ForgetPlacementConnection(PeerConnection connection, DisconnectInfo _)
-        {
-            if (connection != null)
-            {
-                _fullyJoined.Remove(connection.Id);
-            }
+            CoopPlugin.Log.LogInfo("[placement] re-sending state baseline to "
+                + context.Peer.Name + " on request.");
+            SendBaseline(context.Peer);
         }
 
         /// <summary>The identity module removed a placement entity. Drop this host's pose state for
@@ -117,49 +103,47 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleMoveIntent(MessageContext messageContext,
+        private ActionOutcome HandleMoveIntent(CoopMessageContext context,
             PlacementMoveIntentMessage message)
         {
-            if (!IsPeerMessage(messageContext) || message == null)
+            if (!IsPlacementPeerMessage(context) || message == null)
             {
                 return ActionOutcome.Reject("placement intent is not admissible");
             }
 
             if (message.Move == null || message.Move.Entity == null)
             {
-                CoopPlugin.Log.LogWarning("[placement] dropped move intent from connection="
-                    + messageContext.Connection.Id + " with no live entity.");
-                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
-                    "placement intent has no live entity");
+                CoopPlugin.Log.LogWarning("[placement] dropped move intent from peer="
+                    + context.Peer.Name + " with no live entity.");
+                return RejectPlacement(context, "placement intent has no live entity", null);
             }
 
             // A settled pose is host-applied, so it is bounded and finite before it can move a
             // real object: an infinite/extreme vector would teleport or corrupt the transform.
+            var obj = message.Move.Entity;
             if (!IsSanePose(message.Move.Pos, message.Move.Rot)
                 || (message.Move.IsBoxed
                     && !IsSanePose(message.Move.BoxedPos, message.Move.BoxedRot)))
             {
-                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
-                    "placement pose is not finite/bounded");
+                return RejectPlacement(context, "placement pose is not finite/bounded", obj);
             }
 
-            var obj = message.Move.Entity;
             var table = obj as InteractablePlayTable;
             if (table != null && !PlayTableHostBehaviour.IsPlacementMoveAllowed(table))
             {
-                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
-                    "play table is occupied or reserved");
+                return RejectPlacement(context, "play table is occupied or reserved", obj);
             }
 
             // The requester must actually be standing at the object it settles, exactly as the
             // trade and deodorant intents require. The authoritative presence is used, never the
             // client-supplied pose.
-            if (!RuntimeContext.PeerPresence.TryGet(messageContext.Connection.Id, out var presence)
+            var player = context.Peer.Player;
+            if (player == null
+                || !RuntimeContext.PeerPresence.TryGet(player.Id, out var presence)
                 || presence.Age > TimeSpan.FromSeconds(2)
                 || !IsWithinPlacementReach(presence.Position, obj.transform.position))
             {
-                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
-                    "sender is not within reach of the placement");
+                return RejectPlacement(context, "sender is not within reach of the placement", obj);
             }
 
             _applyingIntent++;
@@ -167,8 +151,7 @@ namespace CardShopCoop.Modules.World
             {
                 if (!PlacementMoveState.Apply(message.Move, true))
                 {
-                    return RejectPlacement(messageContext.Connection.Id, message.ActionId,
-                        "placement pose could not be applied");
+                    return RejectPlacement(context, "placement pose could not be applied", obj);
                 }
             }
             finally
@@ -176,8 +159,12 @@ namespace CardShopCoop.Modules.World
                 _applyingIntent--;
             }
 
-            NotifyObjectChanged(obj, message.ActionId, true);
-            return ActionOutcome.Applied();
+            // The actor's own state travels in the response; everyone else gets the delta.
+            NotifyObjectChanged(obj, true, context.Peer);
+            return ActionOutcome.Applied(new PlacementMoveResponse
+            {
+                Move = PlacementEntityState.Capture(obj).ToEntry(),
+            });
         }
 
         /// <summary>Re-read the live lists: publish a state update for every entity whose observed
@@ -202,19 +189,16 @@ namespace CardShopCoop.Modules.World
 
             foreach (var pair in current)
             {
-                PublishState(pair.Value, Guid.Empty, false);
+                PublishState(pair.Value, false, null);
             }
 
             PlacementInterop.NotifyStructureChanged(-1);
         }
 
         internal void NotifyObjectChanged(InteractableObject obj)
-            => NotifyObjectChanged(obj, Guid.Empty, false);
+            => NotifyObjectChanged(obj, false, null);
 
-        internal void SetNextMutationPrediction(Guid actionId)
-            => _nextMutationPrediction = actionId;
-
-        private void NotifyObjectChanged(InteractableObject obj, Guid actionId, bool force)
+        private void NotifyObjectChanged(InteractableObject obj, bool force, ICoopPeer except)
         {
             if (_applyingIntent != 0 || obj == null)
             {
@@ -228,14 +212,14 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            PublishState(PlacementEntityState.Capture(obj), actionId, force);
+            PublishState(PlacementEntityState.Capture(obj), force, except);
         }
 
         /// <summary>Publishes the smallest delta that carries <paramref name="current"/>. An entity
         /// the host has not observed yet gets a full update rather than an add: the identity module
         /// already announced it and its creation pose, so this is a reference-message state sync,
         /// not a creation.</summary>
-        private void PublishState(PlacementEntitySnapshot current, Guid actionId, bool forcePose)
+        private void PublishState(PlacementEntitySnapshot current, bool forcePose, ICoopPeer except)
         {
             if (current == null || current.Entity == null
                 || !PlacementInterop.HasPlacementIdentity(current.Entity,
@@ -247,16 +231,16 @@ namespace CardShopCoop.Modules.World
 
             if (!_known.TryGetValue(current.Entity, out var old))
             {
-                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), actionId);
+                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), except);
             }
             else if (old.IsBoxed != current.IsBoxed
                 || old.BoxedPos != current.BoxedPos || old.BoxedRot != current.BoxedRot)
             {
-                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), actionId);
+                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), except);
             }
             else if (forcePose || old.Pos != current.Pos || old.Rot != current.Rot)
             {
-                PublishDelta(PlacementDeltaMessage.Pose, current.ToEntry(), actionId);
+                PublishDelta(PlacementDeltaMessage.Pose, current.ToEntry(), except);
             }
             else
             {
@@ -282,9 +266,9 @@ namespace CardShopCoop.Modules.World
             };
         }
 
-        private void SendBaseline(int connectionId)
+        private void SendBaseline(ICoopPeer peer)
         {
-            if (connectionId <= 0 || !RuntimeContext.InGame())
+            if (peer == null || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -292,19 +276,11 @@ namespace CardShopCoop.Modules.World
             var baseline = BuildBaseline();
             if (baseline != null)
             {
-                RuntimeContext.Send(connectionId, baseline);
+                peer.Send(baseline);
             }
         }
 
-        private void SendBaselinesToJoined()
-        {
-            foreach (var connectionId in new List<int>(_fullyJoined))
-            {
-                SendBaseline(connectionId);
-            }
-        }
-
-        private void PublishDelta(byte operation, PlacementMoveEntry entity, Guid actionId)
+        private void PublishDelta(byte operation, PlacementMoveEntry entity, ICoopPeer except)
         {
             if (_shutdown || !RuntimeContext.InGame() || entity == null || entity.Entity == null
                 || !PlacementInterop.HasSharedIdentity(entity.Entity))
@@ -317,24 +293,38 @@ namespace CardShopCoop.Modules.World
 
             CoopPlugin.Log.LogInfo("[placement] publish delta op=" + operation + " entity="
                 + PlacementInterop.Describe(entity.Entity) + ".");
-            RuntimeContext.Broadcast(new PlacementDeltaMessage
+            var delta = new PlacementDeltaMessage
             {
-                ActionId = actionId,
                 Operation = operation,
                 Entity = entity,
-            });
+            };
+            if (except != null)
+            {
+                Context.BroadcastExcept(except, delta);
+            }
+            else
+            {
+                Context.Broadcast(delta);
+            }
         }
 
-        private static ActionOutcome RejectPlacement(int connectionId, Guid actionId, string reason)
+        private static ActionOutcome RejectPlacement(CoopMessageContext context, string reason,
+            InteractableObject entity)
         {
-            CoopPlugin.Log.LogWarning("placement intent rejected for connection=" + connectionId
-                + " id=" + actionId + ": " + reason);
-            return ActionOutcome.Reject(reason);
+            CoopPlugin.Log.LogWarning("[placement] move rejected peer="
+                + (context?.Peer?.Name ?? "<unknown>") + ": " + reason + ".");
+            var response = entity != null
+                ? new PlacementMoveResponse
+                {
+                    Move = PlacementEntityState.Capture(entity).ToEntry(),
+                }
+                : null;
+            return ActionOutcome.Reject(reason, response);
         }
 
-        private bool IsPeerMessage(MessageContext messageContext)
-            => !_shutdown && RuntimeContext.InGame() && messageContext?.Connection != null
-                && IsJoinPhase(messageContext.Connection.State);
+        private bool IsPlacementPeerMessage(CoopMessageContext context)
+            => !_shutdown && RuntimeContext.InGame() && context?.Peer != null
+                && context.IsAuthenticated;
 
         private static bool IsJoinPhase(ConnectionState state)
             => state == ConnectionState.Transferring || state == ConnectionState.FullyJoined;
@@ -439,9 +429,7 @@ namespace CardShopCoop.Modules.World
             host._placementHold?.LocalEnded(__instance);
             WarehouseShelfInteraction.SetStoredBoxVisuals(__instance,
                 !__instance.GetIsBoxedUp());
-            var actionId = host._nextMutationPrediction;
-            host._nextMutationPrediction = Guid.Empty;
-            host.NotifyObjectChanged(__instance, actionId, false);
+            host.NotifyObjectChanged(__instance);
         }
     }
 }

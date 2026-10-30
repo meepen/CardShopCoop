@@ -69,7 +69,7 @@ namespace CardShopCoop.Modules.Tutorial
         }
 
         [IntentValidator]
-        private IntentValidation Validate(CoopMessageContext context, TutorialActionIntent message)
+        private IntentValidation Validate(MessageContext context, TutorialActionIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
@@ -113,7 +113,7 @@ namespace CardShopCoop.Modules.Tutorial
         /// requester undoes its optimistic run before applying this authority. The generic
         /// rollback that follows then resolves an action that is already retired.</summary>
         [IntentRejected]
-        private void Rejected(CoopMessageContext context, TutorialActionIntent message, string reason)
+        private void Rejected(MessageContext context, TutorialActionIntent message, string reason)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
@@ -128,22 +128,21 @@ namespace CardShopCoop.Modules.Tutorial
         /// <summary>Applies the validated increment through the game path, then publishes the
         /// authoritative post-action progression.</summary>
         [MessageHandler]
-        private ActionOutcome Handle(CoopMessageContext context, TutorialActionIntent message)
+        private ActionOutcome Handle(MessageContext context, TutorialActionIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
                 return ActionOutcome.Reject("tutorial session is not active");
             }
 
-            message.OnApply();
+            TutorialActions.Add(message.Condition, message.Increment);
             Publish(message.ActionId, rejected: false);
             return ActionOutcome.Applied();
         }
 
         /// <summary>Publishes a host-originated change. While this behaviour is applying a client's
-        /// intent (its <c>OnApply</c> or its handler) the guard suppresses this observer, so the
-        /// intent's handler owns the one authoritative publish and the change is never broadcast
-        /// twice.</summary>
+        /// intent (its handler) the guard suppresses this observer, so the intent's handler owns
+        /// the one authoritative publish and the change is never broadcast twice.</summary>
         internal void PublishHostChange()
         {
             if (ReentrancyGuard.Suppressed(this))

@@ -18,23 +18,16 @@ namespace CardShopCoop.Modules.Hud
         private const float MaxContribution = 100000000f;
         private const int MaxProgressContribution = 100000000;
 
+        /// <summary>The game's own queued-event dispatch. The handler applies the contribution
+        /// synchronously through this so it can answer with the host's post-action snapshot; a
+        /// queued event would not have run yet when the handler returns.</summary>
+        private static readonly System.Reflection.MethodInfo NotifyEvent =
+            CardShopCoop.Util.ReflectionSurface.RequiredMethod(typeof(CEventManager), "OnNotify");
+
         private static HudHostBehaviour _active;
         private bool _shutdown;
         private bool _initialized;
-        private Guid _pendingActionId;
-        private readonly Dictionary<CEvent, PendingContribution> _contributionsByEvent = new();
-
-        private readonly struct PendingContribution
-        {
-            internal readonly HudContributionKind Kind;
-            internal readonly Guid ActionId;
-
-            internal PendingContribution(HudContributionKind kind, Guid actionId)
-            {
-                Kind = kind;
-                ActionId = actionId;
-            }
-        }
+        private readonly HashSet<CEvent> _queuedContributions = new();
 
         private void OnEnable()
         {
@@ -79,16 +72,12 @@ namespace CardShopCoop.Modules.Hud
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
-            if (_shutdown || connection == null)
-            {
-                return;
-            }
-
-            SendBaseline(connection.Id);
+            PeerHandle.ForConnection(connection)?.Send(Snapshot());
         }
 
         [MessageHandler]
-        private ActionOutcome HandleContribution(MessageContext context, HudContributionIntent message)
+        private ActionOutcome HandleContribution(CoopMessageContext context,
+            HudContributionIntent message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
             {
@@ -97,55 +86,65 @@ namespace CardShopCoop.Modules.Hud
 
             if (!TryValidateContribution(message))
             {
-                return ActionOutcome.Reject("HUD contribution is invalid");
+                return RejectContribution("HUD contribution is invalid");
             }
 
             switch (message.Kind)
             {
                 case HudContributionKind.AddCoin:
-                    QueueContribution(message.ActionId, new CEventPlayer_AddCoin(message.Value));
-                    return ActionOutcome.Applied();
+                    ApplyEvent(new CEventPlayer_AddCoin(message.Value));
+                    return AppliedContribution(message.Kind);
                 case HudContributionKind.ReduceCoin:
+                    // Admit against the shared wallet ledger, then apply the game's own debit
+                    // event now so the answer below carries the post-spend balance. Queueing the
+                    // debit would answer with the pre-spend wallet and apply it a frame later.
                     if (!EconomyAuthority.TryReserveHostSpend(message.Value, out var spend))
                     {
-                        _pendingActionId = Guid.Empty;
-                        return ActionOutcome.Reject("host wallet could not cover the contribution");
+                        return RejectContribution("host wallet could not cover the contribution");
                     }
 
-                    _pendingActionId = message.ActionId;
-                    bool queued;
-                    try
-                    {
-                        queued = EconomyAuthority.QueueHostSpend(spend);
-                    }
-                    finally
-                    {
-                        _pendingActionId = Guid.Empty;
-                    }
-
-                    if (!queued)
-                    {
-                        spend.Dispose();
-                        return ActionOutcome.Reject("host wallet spend could not be admitted");
-                    }
-
-                    return ActionOutcome.Applied();
+                    spend.Dispose();
+                    ApplyEvent(new CEventPlayer_ReduceCoin(message.Value));
+                    return AppliedContribution(message.Kind);
                 case HudContributionKind.AddShopExperience:
-                    QueueContribution(message.ActionId,
-                        new CEventPlayer_AddShopExp((int)message.Value));
-                    return ActionOutcome.Applied();
+                    ApplyEvent(new CEventPlayer_AddShopExp((int)message.Value));
+                    return AppliedContribution(message.Kind);
                 case HudContributionKind.AddFame:
-                    QueueContribution(message.ActionId,
-                        new CEventPlayer_AddFame((int)message.Value));
-                    return ActionOutcome.Applied();
+                    ApplyEvent(new CEventPlayer_AddFame((int)message.Value));
+                    return AppliedContribution(message.Kind);
                 default:
-                    return ActionOutcome.Reject("unsupported HUD contribution kind");
+                    return RejectContribution("unsupported HUD contribution kind");
             }
         }
 
-        private bool IsAuthenticatedSender(MessageContext context)
+        /// <summary>Applies the contribution through the game's own event listeners immediately,
+        /// so the answer carries the resulting authoritative values.</summary>
+        private static void ApplyEvent(CEvent evt)
         {
-            return !_shutdown && RuntimeContext.InGame() && context?.Connection != null
+            var manager = CSingleton<CEventManager>.Instance;
+            if (manager == null || NotifyEvent == null)
+            {
+                throw new InvalidOperationException(
+                    "HUD contribution could not reach the game event manager.");
+            }
+
+            NotifyEvent.Invoke(manager, new object[] { evt });
+        }
+
+        /// <summary>Broadcasts and answers with the host's absolute post-contribution state.</summary>
+        private ActionOutcome AppliedContribution(HudContributionKind kind)
+        {
+            var snapshot = Snapshot();
+            Broadcast(kind, snapshot);
+            return ActionOutcome.Applied(new HudContributionResponse { State = snapshot });
+        }
+
+        private static ActionOutcome RejectContribution(string reason)
+            => ActionOutcome.Reject(reason, new HudContributionResponse { State = Snapshot() });
+
+        private bool IsAuthenticatedSender(CoopMessageContext context)
+        {
+            return !_shutdown && RuntimeContext.InGame() && context?.Peer != null
                 && context.IsAuthenticated;
         }
 
@@ -168,65 +167,48 @@ namespace CardShopCoop.Modules.Hud
                 && message.Value == (int)message.Value;
         }
 
-        private void QueueContribution(Guid actionId, CEvent contribution)
-        {
-            _pendingActionId = actionId;
-            try
-            {
-                CEventManager.QueueEvent(contribution);
-            }
-            finally
-            {
-                _pendingActionId = Guid.Empty;
-            }
-        }
-
+        /// <summary>Publishes one host-originated economy event (the host's own play or another
+        /// module's automation). Guest contributions are applied inline by the handler and never
+        /// reach this path.</summary>
         private void PublishContribution(HudContributionKind kind, CEvent evt)
         {
-            if (evt == null || !_contributionsByEvent.TryGetValue(evt, out var contribution))
+            if (evt == null || !_queuedContributions.Remove(evt))
             {
                 return;
             }
 
-            _contributionsByEvent.Remove(evt);
             if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            if (contribution.Kind != kind)
-            {
-                throw new InvalidOperationException("HUD contribution event kind is inconsistent.");
-            }
+            Broadcast(kind, Snapshot());
+        }
 
-
-            var snapshot = Snapshot();
-
+        private void Broadcast(HudContributionKind kind, HudAuthoritativeState snapshot)
+        {
             switch (kind)
             {
                 case HudContributionKind.AddCoin:
                 case HudContributionKind.ReduceCoin:
-                    RuntimeContext.Broadcast(new HudWalletDeltaMessage
+                    Context.Broadcast(new HudWalletDeltaMessage
                     {
-                        ActionId = contribution.ActionId,
                         Coins = snapshot.Coins,
                         CoinDisplay = snapshot.CoinDisplay,
                     });
 
                     break;
                 case HudContributionKind.AddShopExperience:
-                    RuntimeContext.Broadcast(new HudProgressDeltaMessage
+                    Context.Broadcast(new HudProgressDeltaMessage
                     {
-                        ActionId = contribution.ActionId,
                         Experience = snapshot.Experience,
                         Level = snapshot.Level,
                     });
 
                     break;
                 case HudContributionKind.AddFame:
-                    RuntimeContext.Broadcast(new HudFameDeltaMessage
+                    Context.Broadcast(new HudFameDeltaMessage
                     {
-                        ActionId = contribution.ActionId,
                         Fame = snapshot.Fame,
                     });
 
@@ -264,12 +246,6 @@ namespace CardShopCoop.Modules.Hud
             return false;
         }
 
-        private void SendBaseline(int connectionId)
-        {
-            var snapshot = Snapshot();
-            RuntimeContext.Send(connectionId, snapshot);
-        }
-
         private static HudAuthoritativeState Snapshot()
         {
             return new HudAuthoritativeState
@@ -295,8 +271,7 @@ namespace CardShopCoop.Modules.Hud
                 _active = null;
             }
 
-            _pendingActionId = Guid.Empty;
-            _contributionsByEvent.Clear();
+            _queuedContributions.Clear();
             HudPresentationState.Clear();
         }
 
@@ -310,13 +285,12 @@ namespace CardShopCoop.Modules.Hud
             {
                 var active = _active;
                 if (active == null || active._shutdown
-                    || !active.RuntimeContext.InGame() || !TryGetContributionKind(evt, out var kind))
+                    || !active.RuntimeContext.InGame() || !TryGetContributionKind(evt, out _))
                 {
                     return;
                 }
 
-                active._contributionsByEvent[evt] = new PendingContribution(kind,
-                    active._pendingActionId);
+                active._queuedContributions.Add(evt);
             }
         }
 

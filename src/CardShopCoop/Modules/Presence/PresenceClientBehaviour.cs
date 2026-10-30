@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Presence
@@ -24,6 +25,7 @@ namespace CardShopCoop.Modules.Presence
         private int _selfId = -1;
         private bool _joined;
         private bool _modelPending;
+        private int _pendingModelRequests;
         private bool _shutdown;
         private PresenceModelStateMessage _pendingModelState;
         private PresenceModelEntry _lastSentModel;
@@ -293,6 +295,13 @@ namespace CardShopCoop.Modules.Presence
                 _models[RosterModelId(entry.Id)] = Clone(entry);
                 if (entry.Id == _selfId)
                 {
+                    // A model request that is still waiting for its host decision owns the local
+                    // appearance; this join baseline crossed it on the wire and is older.
+                    if (_pendingModelRequests > 0)
+                    {
+                        continue;
+                    }
+
                     _lastSentModel = Clone(entry);
                     _service.ApplyAuthoritativeLocalModel(entry);
                     continue;
@@ -341,19 +350,14 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            _models[RosterModelId(message.Id)] = Clone(message.Entry);
-
+            // The actor's own appearance is settled by its PresenceModelResponseMessage; a delta
+            // is only relayed to the other peers.
             if (message.Id == _selfId)
             {
-                ActionLedger.AckOrApply(message.ActionId,
-                    () =>
-                    {
-                        _service.ApplyPredictionLocalModel(message.Entry);
-                        _lastSentModel = Clone(message.Entry);
-                    });
                 return;
             }
 
+            _models[RosterModelId(message.Id)] = Clone(message.Entry);
             _modelIds.Add(message.Id);
             _service.SetModel(message.Id == 0 ? 1 : 1000 + message.Id, message.Entry);
         }
@@ -387,7 +391,7 @@ namespace CardShopCoop.Modules.Presence
         [OnClientDisconnected]
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
-            if (connection?.Id != 1)
+            if (PeerHandle.ForConnection(connection)?.IsHost != true)
             {
                 return;
             }
@@ -398,6 +402,7 @@ namespace CardShopCoop.Modules.Presence
             _modelIds.Clear();
             _models.Clear();
             _joined = false;
+            _pendingModelRequests = 0;
             _service?.ClearRemoteAvatars();
         }
 
@@ -405,7 +410,7 @@ namespace CardShopCoop.Modules.Presence
         {
             if (CanSendIntent())
             {
-                RuntimeContext.Send(1, new PresenceEmoteMessage { Emote = 0 });
+                Context.Send(new PresenceEmoteMessage { Emote = 0 });
             }
         }
 
@@ -413,7 +418,7 @@ namespace CardShopCoop.Modules.Presence
         {
             if (CanSendIntent())
             {
-                RuntimeContext.Send(1, new PresenceActivityMessage { Activity = 1, Pack = pack });
+                Context.Send(new PresenceActivityMessage { Activity = 1, Pack = pack });
             }
         }
 
@@ -443,6 +448,7 @@ namespace CardShopCoop.Modules.Presence
             _models.Clear();
             _joined = false;
             _modelPending = false;
+            _pendingModelRequests = 0;
             _pendingModelState = null;
             _lastSentModel = null;
             PresenceApi.NotifyRosterChanged();
@@ -450,6 +456,10 @@ namespace CardShopCoop.Modules.Presence
 
         private void OnDestroy() => Shutdown();
 
+        /// <summary>The editor already applied this model change through the service's game path
+        /// (this observer runs from the service's ModelChanged event). Send the prediction with
+        /// the previous local model as its undo state; the host answers with the authoritative
+        /// appearance for both accept and reject.</summary>
         private void OnLocalModelChanged(PresenceModelEntry model)
         {
             if (model == null)
@@ -457,52 +467,83 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            if (CanSendIntent())
+            if (!CanSendIntent())
             {
-                _modelPending = false;
-                var next = Clone(model);
-                if (_lastSentModel == null)
+                if (_joined)
                 {
-                    RuntimeContext.Send(1, new PresenceModelRequestMessage
-                    {
-                        ActionId = Guid.Empty,
-                        Female = next.Female,
-                        ModelIndex = next.ModelIndex,
-                        CustomizationJson = next.CustomizationJson,
-                    });
-                    _lastSentModel = next;
-                    return;
+                    _modelPending = true;
                 }
 
-                var previous = Clone(_lastSentModel);
-                // The editor already applied this model change through the service's game path
-                // (OnLocalModelChanged runs from the service's ModelChanged event), so register the
-                // prediction post-hoc: apply/undo only replay the change through the service, and
-                // the local send record is advanced here rather than by the prediction.
-                ActionLedger.Submit(
-                    "presence.model",
-                    actionId => RuntimeContext.Send(1, new PresenceModelRequestMessage
-                    {
-                        ActionId = actionId,
-                        Female = next.Female,
-                        ModelIndex = next.ModelIndex,
-                        CustomizationJson = next.CustomizationJson,
-                    }),
-                    () =>
-                    {
-                        _service.ApplyPredictionLocalModel(next);
-                        _lastSentModel = Clone(next);
-                    },
-                    () =>
-                    {
-                        _service.ApplyPredictionLocalModel(previous);
-                        _lastSentModel = Clone(previous);
-                    });
-                _lastSentModel = next;
+                return;
             }
-            else if (_joined)
+
+            _modelPending = false;
+            var next = Clone(model);
+            var previous = Clone(_lastSentModel);
+            _lastSentModel = Clone(next);
+            Context.Send(new PresenceModelRequestMessage
             {
-                _modelPending = true;
+                Female = next.Female,
+                ModelIndex = next.ModelIndex,
+                CustomizationJson = next.CustomizationJson,
+                Previous = previous,
+            });
+            _pendingModelRequests++;
+        }
+
+        /// <summary>Client: reverse the appearance prediction. The authoritative state, if any,
+        /// is applied by <see cref="MergeModel"/> afterwards.</summary>
+        internal void UndoModel(PresenceModelRequestMessage message)
+        {
+            if (_shutdown || message == null || message.Previous == null)
+            {
+                return;
+            }
+
+            _lastSentModel = Clone(message.Previous);
+            RememberSelfModel(message.Previous);
+            _service.ApplyPredictionLocalModel(message.Previous);
+        }
+
+        /// <summary>Client: settle the appearance prediction with the host's authoritative
+        /// answer. Runs once on every resolution, after <see cref="UndoModel"/> when rejected.</summary>
+        internal void MergeModel(PresenceModelRequestMessage message,
+            ActionResponseMessage response)
+        {
+            if (_pendingModelRequests > 0)
+            {
+                _pendingModelRequests--;
+            }
+
+            if (_shutdown || message == null
+                || response is not PresenceModelResponseMessage answer || answer.Entry == null)
+            {
+                return;
+            }
+
+            _lastSentModel = Clone(answer.Entry);
+            RememberSelfModel(answer.Entry);
+            if (response.Rejected)
+            {
+                // The undo already restored the previous appearance; this settles it on the
+                // host's exact stored state when that differs.
+                _service.ApplyPredictionLocalModel(answer.Entry);
+            }
+            else
+            {
+                // The prediction is already on screen and saved. Re-anchor the local record to
+                // the host's canonical entry without rebuilding the editor body.
+                _service.ApplyAuthoritativeLocalModel(answer.Entry);
+            }
+        }
+
+        /// <summary>Keeps the diagnostics model copy in step with the authoritative local
+        /// appearance. This client's own entry is settled by the action response, not a delta.</summary>
+        private void RememberSelfModel(PresenceModelEntry model)
+        {
+            if (_selfId > 0 && model != null)
+            {
+                _models[RosterModelId(_selfId)] = Clone(model);
             }
         }
 
@@ -527,7 +568,7 @@ namespace CardShopCoop.Modules.Presence
             }
 
             _stateTimer = 0f;
-            RuntimeContext.Send(1, state);
+            Context.Send(state);
             PublishLocalHold();
         }
 
@@ -543,7 +584,7 @@ namespace CardShopCoop.Modules.Presence
 
             if (_service.TryConsumeLocalHoldChange(out var hold))
             {
-                RuntimeContext.Send(1, hold);
+                Context.Send(hold);
             }
         }
 

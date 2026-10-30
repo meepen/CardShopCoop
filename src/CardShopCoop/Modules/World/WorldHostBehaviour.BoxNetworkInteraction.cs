@@ -29,135 +29,149 @@ namespace CardShopCoop.Modules.World
             Harmony.CreateClassProcessor(typeof(HostRestockInitPatch)).Patch();
         }
 
+        /// <summary>True when an authenticated, fully joined peer may act on shared world state.
+        /// A guest in the transfer window already plays from the transferred save, so it counts
+        /// as joined for these actions.</summary>
+        private static bool CanApplyWorldAction(MessageContext context)
+            => context != null && context.InGame && context.IsAuthenticated;
+
+        /// <summary>The host's canonical player id for the sender. A peer handle is the only
+        /// identity the world protocol is allowed to carry; the box interaction DTO still names
+        /// its holder with the same canonical id.</summary>
+        private static int PlayerIdOf(ICoopPeer peer) => peer?.Player?.Id ?? 0;
+
         [MessageHandler]
         private ActionOutcome HandleBoxDestroyRequest(MessageContext context,
             BoxDestroyRequestMessage message)
         {
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context) && message != null)
+            if (!CanApplyWorldAction(context) || message == null
+                || message.BoxNetworkId == Guid.Empty)
             {
-                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
-                {
-                    if (!_boxNetworkInteraction.TryGetBox(message.BoxNetworkId, out var box))
-                    {
-                        // The creator destroyed the box before the host materialized it. Retire
-                        // the staged id instead of rejecting: the client's local destroy already
-                        // happened, and a rollback would resurrect the box.
-                        _boxNetworkInteraction.CancelHostCreatedId(message.BoxNetworkId);
-                        CancelStagedDeliveryId(message.BoxNetworkId);
-                        CoopPlugin.Log.LogInfo("[box-id] destroy for id=" + message.BoxNetworkId
-                            + " has no live host box; staged id canceled.");
-                        return true;
-                    }
-
-                    return _boxNetworkInteraction.HostDestroyRequested(box);
-                }));
+                return ActionOutcome.Reject("box destroy request has no actionable identity");
             }
 
-            return RejectWorldIntent(context, message);
+            if (!_boxNetworkInteraction.TryGetBox(message.BoxNetworkId, out var box))
+            {
+                // The creator destroyed the box before the host materialized it. Retire the
+                // staged id instead of rejecting: the client's local destroy already happened,
+                // and a rollback would resurrect the box.
+                _boxNetworkInteraction.CancelHostCreatedId(message.BoxNetworkId);
+                CancelStagedDeliveryId(message.BoxNetworkId);
+                CoopPlugin.Log.LogInfo("[box-id] destroy for id=" + message.BoxNetworkId
+                    + " has no live host box; staged id canceled.");
+                return ActionOutcome.Applied();
+            }
+
+            return _boxNetworkInteraction.HostDestroyRequested(box)
+                ? ActionOutcome.Applied()
+                : ActionOutcome.Reject("the host could not destroy the box");
         }
 
         [MessageHandler]
         private ActionOutcome HandleFurnitureDestroy(MessageContext context,
             FurnitureDestroyIntent message)
         {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Entity == null)
+            if (!CanApplyWorldAction(context) || message?.Entity == null)
             {
-                return RejectWorldIntent(context, message);
+                return ActionOutcome.Reject("furniture destroy request has no live furniture");
             }
 
-            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
+            var furniture = message.Entity;
+            if (PlacementInterop.FindKind(furniture) < 0)
             {
-                var furniture = message.Entity;
-                if (PlacementInterop.FindKind(furniture) < 0)
-                {
-                    CoopPlugin.Log.LogWarning("[box-furniture] dropped destroy request: "
-                        + furniture.name + " is not a live placement object.");
-                    return false;
-                }
+                CoopPlugin.Log.LogWarning("[box-furniture] dropped destroy request: "
+                    + furniture.name + " is not a live placement object.");
+                return ActionOutcome.Reject("the furniture is not a live placement object");
+            }
 
-                // The game's own destroy path retires the furniture and the package view; the
-                // placement removal publishes the entity removal to every peer.
-                return PlacementObjectIdentity
-                    .Destroy(furniture);
-            }));
+            // The game's own destroy path retires the furniture and the package view; the
+            // placement removal publishes the entity removal to every peer.
+            return PlacementObjectIdentity.Destroy(furniture)
+                ? ActionOutcome.Applied()
+                : ActionOutcome.Reject("the host could not destroy the furniture");
         }
 
         [MessageHandler]
         private ActionOutcome HandleFurnitureBoxUp(MessageContext context,
             FurnitureBoxUpRequestMessage message)
         {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context)
-                || message == null)
+            if (!CanApplyWorldAction(context) || message == null)
             {
-                return RejectWorldIntent(context, message);
+                return ActionOutcome.Reject("box-up request has no authenticated sender");
             }
 
-            if (message.Entity == null)
+            var match = message.Entity;
+            if (match == null)
             {
                 CoopPlugin.Log.LogWarning(
                     "[box-furniture] dropped box-up request: the furniture did not resolve to a live object.");
-                return RejectWorldIntent(context, message);
+                return ActionOutcome.Reject("the furniture did not resolve to a live object");
             }
 
-            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
+            var requester = message.Peer;
+            if (requester == null)
             {
-                var match = message.Entity;
-                if (match.m_ObjectType != message.ObjectType)
-                {
-                    CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request name="
-                        + match.name + " type=" + message.ObjectType + ": the live object is "
-                        + match.m_ObjectType + ".");
-                    return false;
-                }
+                CoopPlugin.Log.LogWarning(
+                    "[box-furniture] dropped box-up request: the sender peer is unknown.");
+                return ActionOutcome.Reject("box-up request has no authenticated sender");
+            }
 
-                // A box-up while the requester is moving the object supersedes that move. Clear
-                // the hold (and the host's remote moving state) before validating, so a valid
-                // box-up is not rejected as a moving object.
-                _placementHold?.EndIfHeldBy(match, context.ConnectionId);
+            if (match.m_ObjectType != message.ObjectType)
+            {
+                CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request name="
+                    + match.name + " type=" + message.ObjectType + ": the live object is "
+                    + match.m_ObjectType + ".");
+                return ActionOutcome.Reject("the live object type does not match the box-up request");
+            }
 
-                if (match is InteractablePlayTable table
-                    && !PlayTableHostBehaviour.IsBoxUpAllowed(table))
-                {
-                    CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request name="
-                        + match.name + " type=" + message.ObjectType
-                        + ": table is occupied, reserved, playing, boxed, or tournament-numbered.");
-                    return false;
-                }
+            // A box-up while the requester is moving the object supersedes that move. Clear the
+            // hold (and the host's remote moving state) before validating, so a valid box-up is
+            // not rejected as a moving object.
+            var requesterId = PlayerIdOf(requester);
+            _placementHold?.EndIfHeldBy(match, requester);
 
-                if (match.GetIsBoxedUp() || match.GetIsMovingObject())
-                {
-                    CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request name="
-                        + match.name + " type=" + message.ObjectType + ".");
-                    return false;
-                }
+            if (match is InteractablePlayTable table
+                && !PlayTableHostBehaviour.IsBoxUpAllowed(table))
+            {
+                CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request name="
+                    + match.name + " type=" + message.ObjectType
+                    + ": table is occupied, reserved, playing, boxed, or tournament-numbered.");
+                return ActionOutcome.Reject("the play table cannot be boxed up");
+            }
 
-                CoopPlugin.Log.LogInfo("[box-furniture] applying host box-up name="
+            if (match.GetIsBoxedUp() || match.GetIsMovingObject())
+            {
+                CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request name="
                     + match.name + " type=" + message.ObjectType + ".");
-                // Box up without the host taking the box. The requesting player picked it up,
-                // so they must end up holding it; the host only performs the world mutation.
-                // The package is a view of this furniture and shares its session Guid; no new
-                // box identity is minted or staged.
-                match.BoxUpObject(false);
+                return ActionOutcome.Reject("the furniture is already boxed or moving");
+            }
 
-                if (match.GetPackagingBoxShelf() == null)
-                {
-                    CoopPlugin.Log.LogWarning("[box-furniture] box-up produced no package box name="
-                        + match.name + ".");
-                    return false;
-                }
+            CoopPlugin.Log.LogInfo("[box-furniture] applying host box-up name="
+                + match.name + " type=" + message.ObjectType + ".");
+            // Box up without the host taking the box. The requesting player picked it up, so they
+            // must end up holding it; the host only performs the world mutation. The package is a
+            // view of this furniture and shares its session Guid; no new box identity is minted
+            // or staged.
+            match.BoxUpObject(false);
 
-                // The host's BoxUpObject mutation postfix publishes the boxed placement state
-                // (IsBoxed + boxed pose); now hand the box to the requesting player.
-                GrantFurnitureHold(match, context.ConnectionId, message.ActionId);
-                return true;
-            }));
+            if (match.GetPackagingBoxShelf() == null)
+            {
+                CoopPlugin.Log.LogWarning("[box-furniture] box-up produced no package box name="
+                    + match.name + ".");
+                return ActionOutcome.Reject("the box-up produced no package box");
+            }
+
+            // The host's BoxUpObject mutation postfix publishes the boxed placement state
+            // (IsBoxed + boxed pose); now hand the box to the requesting player.
+            GrantFurnitureHold(match, requesterId, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         /// <summary>After a client boxes furniture up, the box belongs in that player's hands, not
-        /// the host's. Announce the pickup addressed to them: they take it into their local hand and
-        /// stream the hand pose, while every other peer rides their avatar. The pickup carries the
-        /// box-up prediction id so the creator retires its intent (the box lifecycle message has no
-        /// correlation id).</summary>
+        /// the host's. Announce the pickup addressed to them: they take it into their local hand
+        /// and stream the hand pose, while every other peer rides their avatar. The pickup carries
+        /// the box-up action id for diagnostics; the action's own response is what settles the
+        /// prediction.</summary>
         private void GrantFurnitureHold(InteractableObject furniture, int holderConnectionId,
             Guid actionId)
         {
@@ -183,74 +197,75 @@ namespace CardShopCoop.Modules.World
                 HolderConnectionId = holderConnectionId,
             };
             _playerBoxInteraction.ApplyIncoming(pickup);
-            BroadcastWorld(pickup);
+            Context.Broadcast(pickup);
         }
 
         [MessageHandler]
         private ActionOutcome HandleBoxStateRequest(MessageContext context,
             BoxStateRequestMessage message)
         {
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
+            if (!CanApplyWorldAction(context) || message?.Box == null)
             {
-                if (message?.Box == null)
-                {
-                    CoopPlugin.Log.LogWarning(
-                        "[box-id] dropped box state request: the box did not resolve to a live object.");
-                    return RejectWorldIntent(context, message);
-                }
-
-                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
-                {
-                    if (message.Box is not InteractablePackagingBox_Item item
-                        || !_boxNetworkInteraction.TryGetId(item, out var boxId))
-                    {
-                        CoopPlugin.Log.LogWarning(
-                            "[box-id] dropped box state request: the live box has no identity.");
-                        return false;
-                    }
-
-                    // A box's contents are rewritten by the player acting on it: the holder whose
-                    // hand mirrors this box, or any player using an open box that nobody carries
-                    // (an open box on the floor). The host's replica also reports itself as held
-                    // for a mirrored remote hold, so the holder must be resolved through the mirror
-                    // rather than the local hold flag; the flag only distinguishes "free box" from
-                    // "box in somebody's hand". A box the host itself carries belongs to the host,
-                    // so a client can never rewrite it.
-                    var held = _boxNetworkInteraction.IsBeingHeld(item);
-                    var holder = 0;
-                    var mirrored = _playerBoxInteraction != null
-                        && _playerBoxInteraction.TryGetRemoteHolder(boxId, out holder);
-                    var open = BoxNetworkInteraction.IsBoxOpen(item);
-                    var requesterHolds = mirrored && holder == context.ConnectionId;
-                    var freeOpenBox = !held && open;
-                    if (message.ContentsChanged && !requesterHolds && !freeOpenBox)
-                    {
-                        CoopPlugin.Log.LogWarning("[box-id] rejected box state request id="
-                            + boxId + " name=" + item.name + " from conn="
-                            + context.ConnectionId + ": the sender is not the box holder (isHeld="
-                            + held + " open=" + open + " mirroredHolder="
-                            + (mirrored ? holder.ToString() : "none") + ").");
-                        return false;
-                    }
-
-                    // Validates the client's contents payload against IsValidItem/MaxItemCount
-                    // before ApplyItemState would spawn it.
-                    if (!_boxNetworkInteraction.ApplyHostBoxState(item, message))
-                    {
-                        return false;
-                    }
-
-                    // The requesting player is authoritative for the box they are holding: the
-                    // game's own operation already applied their local mutation and the intent
-                    // carries its exact result. Echoing it back would rebuild their live
-                    // compartment from an older snapshot and overwrite newer local changes
-                    // (the count ping-pong), so relay the mirror only to the other peers.
-                    RelayItemBoxState(item, context.ConnectionId);
-                    return true;
-                }));
+                CoopPlugin.Log.LogWarning(
+                    "[box-id] dropped box state request: the box did not resolve to a live object.");
+                return ActionOutcome.Reject("the box did not resolve to a live object");
             }
 
-            return RejectWorldIntent(context, message);
+            if (message.Box is not InteractablePackagingBox_Item item
+                || !_boxNetworkInteraction.TryGetId(item, out var boxId))
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[box-id] dropped box state request: the live box has no identity.");
+                return ActionOutcome.Reject("the live box has no network identity");
+            }
+
+            var requester = message.Peer;
+            if (requester == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[box-id] dropped box state request: the sender peer is unknown.");
+                return ActionOutcome.Reject("box state request has no authenticated sender");
+            }
+
+            // A box's contents are rewritten by the player acting on it: the holder whose hand
+            // mirrors this box, or any player using an open box that nobody carries (an open box
+            // on the floor). The host's replica also reports itself as held for a mirrored remote
+            // hold, so the holder must be resolved through the mirror rather than the local hold
+            // flag; the flag only distinguishes "free box" from "box in somebody's hand". A box
+            // the host itself carries belongs to the host, so a client can never rewrite it.
+            var requesterId = PlayerIdOf(requester);
+            var held = _boxNetworkInteraction.IsBeingHeld(item);
+            var holder = 0;
+            var mirrored = _playerBoxInteraction != null
+                && _playerBoxInteraction.TryGetRemoteHolder(boxId, out holder);
+            var open = BoxNetworkInteraction.IsBoxOpen(item);
+            var requesterHolds = mirrored && holder == requesterId;
+            var freeOpenBox = !held && open;
+            if (message.ContentsChanged && !requesterHolds && !freeOpenBox)
+            {
+                CoopPlugin.Log.LogWarning("[box-id] rejected box state request id="
+                    + boxId + " name=" + item.name + " from " + requester.Name
+                    + ": the sender is not the box holder (isHeld=" + held + " open=" + open
+                    + " mirroredHolder=" + (mirrored ? holder.ToString() : "none") + ").");
+                return ActionOutcome.Reject("the sender is not the box holder",
+                    BuildItemBoxResult(item));
+            }
+
+            // Validates the client's contents payload against IsValidItem/MaxItemCount before
+            // ApplyItemState would spawn it.
+            if (!_boxNetworkInteraction.ApplyHostBoxState(item, message))
+            {
+                return ActionOutcome.Reject("the box contents payload is invalid",
+                    BuildItemBoxResult(item));
+            }
+
+            // The requesting player is authoritative for the box they are holding: the game's own
+            // operation already applied their local mutation and the intent carries its exact
+            // result. Echoing it back would rebuild their live compartment from an older snapshot
+            // and overwrite newer local changes (the count ping-pong), so relay the mirror only to
+            // the other peers.
+            RelayItemBoxState(item, requester);
+            return ActionOutcome.Applied(BuildItemBoxResult(item));
         }
 
         /// <summary>Publishes the host's own item-box mutation to every client.</summary>
@@ -259,7 +274,7 @@ namespace CardShopCoop.Modules.World
             var message = BuildItemBoxState(item);
             if (message != null)
             {
-                BroadcastWorld(message);
+                Context.Broadcast(message);
             }
 
         }
@@ -267,14 +282,23 @@ namespace CardShopCoop.Modules.World
         /// <summary>Publishes the mirrored state of a client's own item-box mutation to the
         /// other peers. The originating client already holds this exact state, so it is excluded
         /// and its live compartment is left untouched.</summary>
-        private void RelayItemBoxState(InteractablePackagingBox_Item item, int excludeConnectionId)
+        private void RelayItemBoxState(InteractablePackagingBox_Item item, ICoopPeer except)
         {
             var message = BuildItemBoxState(item);
-            if (message != null)
+            if (message == null)
             {
-                RelayWorldExcept(excludeConnectionId, message);
+                return;
             }
 
+            if (except == null)
+            {
+                CoopPlugin.Log.LogWarning("[box-id] item-box state for " + item.name
+                    + " has no sender to exclude; broadcasting it instead.");
+                Context.Broadcast(message);
+                return;
+            }
+
+            Context.BroadcastExcept(except, message);
         }
 
         private BoxStateMessage BuildItemBoxState(InteractablePackagingBox_Item item)
@@ -287,6 +311,27 @@ namespace CardShopCoop.Modules.World
 
             var compartment = item.m_ItemCompartment;
             return new BoxStateMessage
+            {
+                Box = item,
+                IsBoxOpened = BoxNetworkInteraction.IsBoxOpen(item),
+                ContentsChanged = true,
+                ItemType = compartment == null ? EItemType.None : compartment.GetItemType(),
+                ItemCount = compartment == null ? 0 : compartment.GetItemCount(),
+            };
+        }
+
+        /// <summary>The actor-only post-action state returned by a box-state action on accept and
+        /// on reject. It mirrors the broadcast state so the acting client's live box lands on the
+        /// host's contents/open flag without receiving its own mutation echoed back.</summary>
+        private BoxStateResult BuildItemBoxResult(InteractablePackagingBox_Item item)
+        {
+            if (item == null)
+            {
+                return null;
+            }
+
+            var compartment = item.m_ItemCompartment;
+            return new BoxStateResult
             {
                 Box = item,
                 IsBoxOpened = BoxNetworkInteraction.IsBoxOpen(item),
@@ -518,5 +563,21 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(InteractablePackagingBox_Item itemBox, int __state)
                 => BroadcastDispensedSourceBox(itemBox, __state);
         }
+    }
+
+    /// <summary>
+    /// Host -> the acting client: the authoritative contents/open state of one item box after a
+    /// box-state action. It is returned on accept and on reject so the actor's live box converges
+    /// on the host's state instead of the inverse of its prediction. A rejection never carries a
+    /// pose or hold; those are owned by the box/warehouse channels.
+    /// </summary>
+    [NetworkMessage]
+    public sealed class BoxStateResult : ActionResponseMessage
+    {
+        public InteractablePackagingBox Box;
+        public bool IsBoxOpened;
+        public bool ContentsChanged;
+        public EItemType ItemType;
+        public int ItemCount;
     }
 }

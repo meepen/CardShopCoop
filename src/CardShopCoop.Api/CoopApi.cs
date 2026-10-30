@@ -19,26 +19,6 @@ namespace CardShopCoop.Api
             get;
         }
 
-        bool ActionActive
-        {
-            get;
-        }
-        bool IsReconciling
-        {
-            get;
-        }
-        bool IsApplying
-        {
-            get;
-        }
-        Guid Submit(string scope, ActionMessage message, Action apply,
-            Action<ActionResponseMessage> undo);
-        void Ack(Guid actionId);
-        void AckOrApply(Guid actionId, Action apply);
-        void Confirm(Guid actionId, Action apply);
-        void ApplyAuthoritative(Guid actionId, Action apply);
-        bool IsPending(Guid actionId);
-        void Rollback(ICoopContext context, int connectionId, Guid actionId);
         object GetExtendedInformation(Type informationType, object gameObject);
         void SetExtendedInformation(Type informationType, object gameObject, object information);
         bool RemoveExtendedInformation(Type informationType, object gameObject);
@@ -66,6 +46,13 @@ namespace CardShopCoop.Api
 
         /// <summary>True while CardShopCoopCommunity is loaded and has installed its binding.</summary>
         public static bool IsAvailable => Binding != null;
+
+        /// <summary>
+        /// The API assembly version, independent of the mod's release version. It changes only
+        /// when the public integration surface changes.
+        /// </summary>
+        public static string ApiVersion
+            => typeof(CoopApi).Assembly.GetName().Version?.ToString();
 
         /// <summary>The live session context, or null when not connected.</summary>
         public static ICoopContext Context => Binding?.Context;

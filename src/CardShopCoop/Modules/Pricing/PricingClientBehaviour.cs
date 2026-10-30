@@ -1,7 +1,7 @@
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Grading;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -15,6 +15,9 @@ namespace CardShopCoop.Modules.Pricing
     public sealed class PricingClientBehaviour : CoopBehaviour
     {
         private static PricingClientBehaviour _active;
+
+        internal static PricingClientBehaviour Active => _active;
+
         private PricingStateMessage _pendingState;
         private readonly Dictionary<EItemType, PricingItemDeltaEntry> _pendingItemDeltas = new();
         private readonly Dictionary<string, PricingCardDeltaEntry> _pendingCardDeltas = new();
@@ -212,75 +215,54 @@ namespace CardShopCoop.Modules.Pricing
 
         private bool ApplyItemDelta(PricingItemDeltaEntry entry)
         {
-            // The batch carries the host's absolute price, so Confirm (retire our prediction, then
-            // always apply the authoritative value). AckOrApply would retire our own echo without
-            // applying it, so a remote same-key entry earlier in the batch could leave us showing
-            // the older price while the host holds ours.
-            ActionLedger.Confirm(entry.ActionId, () =>
+            _applying = true;
+            try
             {
-                _applying = true;
-                try
-                {
-                    CPlayerData.SetItemPrice(entry.ItemType, entry.Price);
-                    PricingDisplay.SetItem(entry.ItemType, entry.Price);
-                }
-                finally
-                {
-                    _applying = false;
-                }
-            });
+                CPlayerData.SetItemPrice(entry.ItemType, entry.Price);
+                PricingDisplay.SetItem(entry.ItemType, entry.Price);
+            }
+            finally
+            {
+                _applying = false;
+            }
+
             return true;
         }
 
         private bool ApplyCardDelta(PricingCardDeltaEntry entry)
         {
-            // Same as the item path: an absolute authoritative price that must be written even
-            // when it retires one of this client's own predictions.
-            ActionLedger.Confirm(entry.ActionId, () =>
+            if (entry.Removed)
             {
-                if (entry.Removed)
-                {
-                    PricingDisplay.RemoveCard(entry.Card, entry.EncodedGrade);
-                    return;
-                }
+                PricingDisplay.RemoveCard(entry.Card, entry.EncodedGrade);
+                return true;
+            }
 
 
-                var copy = PricingInterop.CopyCard(entry.Card, entry.EncodedGrade);
-                GradingApi.Remember(copy);
-                _applying = true;
-                try
-                {
-                    CPlayerData.SetCardPrice(copy, entry.Price);
-                    PricingDisplay.SetCard(copy, entry.EncodedGrade, entry.Price);
-                }
-                finally
-                {
-                    _applying = false;
-                }
-            });
+            var copy = PricingInterop.CopyCard(entry.Card, entry.EncodedGrade);
+            GradingApi.Remember(copy);
+            _applying = true;
+            try
+            {
+                CPlayerData.SetCardPrice(copy, entry.Price);
+                PricingDisplay.SetCard(copy, entry.EncodedGrade, entry.Price);
+            }
+            finally
+            {
+                _applying = false;
+            }
+
             return true;
         }
 
         private void DeferItemDelta(PricingItemDeltaEntry entry)
         {
-            if (_pendingItemDeltas.TryGetValue(entry.ItemType, out var previous))
-            {
-                ActionLedger.Ack(previous.ActionId);
-            }
-
-
+            // Latest absolute host price wins while the content is not ready.
             _pendingItemDeltas[entry.ItemType] = entry;
         }
 
         private void DeferCardDelta(PricingCardDeltaEntry entry)
         {
             var key = PricingInterop.CardKey(entry.Card, entry.EncodedGrade) ?? "null";
-            if (_pendingCardDeltas.TryGetValue(key, out var previous))
-            {
-                ActionLedger.Ack(previous.ActionId);
-            }
-
-
             _pendingCardDeltas[key] = entry;
         }
 
@@ -385,16 +367,12 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            ActionLedger.Submit(
-                "pricing-item:" + (int)type,
-                actionId => RuntimeContext.Send(1, new PricingItemIntentMessage
-                {
-                    ActionId = actionId,
-                    ItemType = type,
-                    Price = price,
-                }),
-                () => ApplyLocalItem(type, price),
-                () => ApplyLocalItem(type, previous));
+            Context.Send(new PricingItemIntentMessage
+            {
+                ItemType = type,
+                Price = price,
+                Previous = previous,
+            });
         }
 
         private void PredictCard(CardData card, float price, int grade, float previous,
@@ -407,20 +385,57 @@ namespace CardShopCoop.Modules.Pricing
 
 
             var copy = PricingInterop.CopyCard(card, grade);
-            var key = PricingInterop.CardKey(copy, grade);
-            ActionLedger.Submit(
-                "pricing-card:" + key,
-                actionId => RuntimeContext.Send(1, new PricingCardIntentMessage
-                {
-                    ActionId = actionId,
-                    Card = PricingInterop.CopyCard(copy, grade),
-                    Price = price,
-                    EncodedGrade = grade,
-                    Shelf = shelf,
-                    Compartment = compartment,
-                }),
-                () => ApplyLocalCard(copy, price),
-                () => ApplyLocalCard(copy, previous));
+            Context.Send(new PricingCardIntentMessage
+            {
+                Card = PricingInterop.CopyCard(copy, grade),
+                Price = price,
+                EncodedGrade = grade,
+                Shelf = shelf,
+                Compartment = compartment,
+                Previous = previous,
+            });
+        }
+
+        internal void UndoItem(PricingItemIntentMessage message)
+        {
+            if (_shutdown || message == null)
+            {
+                return;
+            }
+
+            ApplyLocalItem(message.ItemType, message.Previous);
+        }
+
+        internal void MergeItem(PricingItemIntentMessage message, ActionResponseMessage response)
+        {
+            if (_shutdown || response is not PricingItemResponse answer
+                || float.IsNaN(answer.Price))
+            {
+                return;
+            }
+
+            ApplyLocalItem(message.ItemType, answer.Price);
+        }
+
+        internal void UndoCard(PricingCardIntentMessage message)
+        {
+            if (_shutdown || message?.Card == null)
+            {
+                return;
+            }
+
+            ApplyLocalCard(message.Card, message.Previous);
+        }
+
+        internal void MergeCard(PricingCardIntentMessage message, ActionResponseMessage response)
+        {
+            if (_shutdown || response is not PricingCardResponse answer
+                || float.IsNaN(answer.Price))
+            {
+                return;
+            }
+
+            ApplyLocalCard(answer.Card ?? message?.Card, answer.Price);
         }
 
         private void ApplyLocalItem(EItemType type, float price)
@@ -467,17 +482,6 @@ namespace CardShopCoop.Modules.Pricing
 
         private void ClearPendingDeltas()
         {
-            foreach (var delta in _pendingItemDeltas.Values)
-            {
-                ActionLedger.Ack(delta.ActionId);
-            }
-
-
-            foreach (var delta in _pendingCardDeltas.Values)
-            {
-                ActionLedger.Ack(delta.ActionId);
-            }
-
             _pendingItemDeltas.Clear();
             _pendingCardDeltas.Clear();
         }

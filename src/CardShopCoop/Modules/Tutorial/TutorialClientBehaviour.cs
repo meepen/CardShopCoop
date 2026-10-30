@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
@@ -91,12 +90,12 @@ namespace CardShopCoop.Modules.Tutorial
         }
 
         /// <summary>The game already applied this tutorial change through its own
-        /// <c>AddTaskValue</c>; register one post-hoc action whose apply is only used to replay
-        /// after an earlier rollback, and whose undo restores the captured state. The host validates
-        /// and echoes the action, and a rejection rolls it back. A local decrement (a displayed card
-        /// taken back off a shelf) is observed the same way even though the host accepts progress
-        /// only: the host rejects it and the rollback restores the pre-decrement state, after which
-        /// the host's own authoritative value arrives through the normal state path.</summary>
+        /// <c>AddTaskValue</c>; forward one predicted action whose undo restores the captured
+        /// state. The host validates and echoes the action, and a rejection rolls it back. A local
+        /// decrement (a displayed card taken back off a shelf) is observed the same way even
+        /// though the host accepts progress only: the host rejects it and the rollback restores the
+        /// pre-decrement state, after which the host's own authoritative value arrives through the
+        /// normal state path.</summary>
         private static void ForwardAction(ETutorialTaskCondition condition, float increment,
             TutorialState previous)
         {
@@ -107,15 +106,28 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-            var actionId = ActionLedger.Submit(
-                "tutorial",
-                new TutorialActionIntent { Condition = condition, Increment = increment },
-                () => ApplyLocalAction(condition, increment),
-                () => TryApply(previous));
-            if (actionId == Guid.Empty)
+            var intent = new TutorialActionIntent
+            {
+                Condition = condition,
+                Increment = increment,
+                Previous = previous,
+            };
+            if (client.Context?.Host == null)
             {
                 CoopPlugin.Log.LogError("Tutorial increment was not forwarded to the host: there is "
                     + "no live host connection, so the guest's progress is now local only.");
+                return;
+            }
+
+            client.Context.Send(intent);
+        }
+
+        /// <summary>Restores the client's pre-increment snapshot after a host refusal.</summary>
+        internal static void ApplyPrevious(TutorialState state)
+        {
+            if (state != null)
+            {
+                TryApply(state);
             }
         }
 
@@ -139,15 +151,10 @@ namespace CardShopCoop.Modules.Tutorial
             };
         }
 
-        private static void ApplyLocalAction(ETutorialTaskCondition condition, float increment)
-        {
-            TutorialManager.AddTaskValue(condition, increment);
-        }
-
         /// <summary>Applies an authoritative tutorial state. Returns false while the scene's
         /// tutorial surface is not ready; the caller retains the store value and retries from its
         /// lifecycle hooks instead of failing the reliable message (which would drop the guest).</summary>
-        private static bool TryApply(TutorialState state)
+        internal static bool TryApply(TutorialState state)
         {
             if (state == null)
             {

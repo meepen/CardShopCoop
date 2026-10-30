@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -28,17 +29,48 @@ namespace CardShopCoop.Modules.World
         public PlacementMoveEntry Entity;
     }
 
-    /// <summary>A client request to settle one object at a pose.</summary>
+    /// <summary>A predicted client move: the object has already been placed locally through the
+    /// game's own path. <see cref="OnUndo"/> restores the captured pre-move pose and
+    /// <see cref="OnMerge"/> applies the host's post-action pose from
+    /// <see cref="PlacementMoveResponse"/>.</summary>
     [NetworkMessage]
     public sealed class PlacementMoveIntentMessage : WorldIntentMessage
     {
+        /// <summary>The pose the local game path produced. The host applies exactly this.</summary>
+        public PlacementMoveEntry Move;
+
+        /// <summary>The pose before this peer started moving the object. Local undo state; never
+        /// serialized.</summary>
+        [NonSerialized]
+        internal PlacementMoveEntry Before;
+
+        /// <summary>The client that owns this prediction and its in-flight move bookkeeping. Local
+        /// only.</summary>
+        [NonSerialized]
+        internal WorldClientBehaviour Origin;
+
+        public override void OnUndo(ActionResponseMessage response)
+            => Origin?.UndoPlacementMove(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => Origin?.MergePlacementMove(this, response as PlacementMoveResponse);
+    }
+
+    /// <summary>The host's authoritative placement state after one move, sent to the acting
+    /// client on accept and reject alike. The actor merges it instead of trusting its own
+    /// prediction.</summary>
+    [NetworkMessage]
+    public sealed class PlacementMoveResponse : ActionResponseMessage
+    {
+        /// <summary>The object's full pose/boxed state on the host. Null when the host could not
+        /// resolve the entity at all.</summary>
         public PlacementMoveEntry Move;
     }
 
     /// <summary>Guest -> host: sent once this peer is fully connected, asking for one more
     /// placement state baseline. The join baseline can race the guest's scene as objects finish
     /// their load-time spawn/recovery from the transferred save, so the fresh pass re-poses
-    /// anything that missed. The host answers the requesting connection only.</summary>
+    /// anything that missed. The host answers the requesting peer only.</summary>
     [NetworkMessage]
     public sealed class PlacementBaselineRequestMessage : INetMessage
     {

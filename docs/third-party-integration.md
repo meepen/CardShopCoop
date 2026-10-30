@@ -59,7 +59,8 @@ var tax = Global<ShopTaxRate>.Value; // null when unset
 ```
 
 - `[HostOnlyInformation]` makes the value read-only for clients. Drop it if clients may change
-  the value: a client write becomes an intent, the host applies it, and the client sees the echo.
+  the value: the client sends the write to the host, the host applies it, and the client sees the
+  result.
 - Keep the value immutable; assign a new instance instead of editing the old one.
 - On net472, `init` needs the standard `IsExternalInit` shim.
 
@@ -92,9 +93,9 @@ private void OnBanner(CoopMessageContext from, ShowBanner message)
     => _banner.Show(message.Text);
 ```
 
-`[MessageHandler]` infers the message type from its `INetMessage` parameter. `Context.Broadcast`
-reaches every ready peer from the host, and the host from a client. `Context.Send` reaches one
-peer.
+`[MessageHandler]` infers the message type from its `INetMessage` parameter. From the host,
+`Context.Broadcast` reaches every reachable peer; from a client it reaches the host. `Context.Send`
+also reaches the host from a client.
 
 ## 3. Behaviours and lifecycle
 
@@ -112,8 +113,8 @@ Session behaviours are created and handler-bound while the session is prepared. 
 lifecycle (`Awake`, `OnEnable`, `Start`) and `[OnSessionStarted]` run only after the transport
 starts and the message and extended-information catalogs are frozen.
 
-At that point `Context.Broadcast` is safe. Per-peer sends need a live connection, so send a
-baseline from `[OnFullyJoined]`.
+At that point `Context.Broadcast` is safe. A per-peer send needs a peer that has joined, so send a
+baseline from `[OnFullyJoined]` to the peer you are given.
 
 A `[PersistentBehaviour]` runs its Unity lifecycle at plugin load, before any transport
 exists. Its `[OnSessionStarted]` fires before the transport starts and `[OnSessionStopped]`
@@ -125,9 +126,9 @@ after it stops. It never receives `[OnClientJoined]`, `[OnFullyJoined]`, or
 | --- | --- | --- |
 | `[OnSessionStarted]` | `()` | this peer's session is ready |
 | `[OnSessionStopped]` | `()` | this peer's session ends |
-| `[OnClientJoined]` | `(PeerConnection)` | a peer is admitted, not yet in game |
-| `[OnFullyJoined]` | `(PeerConnection)` | a peer is fully in game |
-| `[OnClientDisconnected]` | `(PeerConnection, DisconnectInfo)` | a peer leaves |
+| `[OnClientJoined]` | `(ICoopPeer)` | a peer is admitted, not yet in game |
+| `[OnFullyJoined]` | `(ICoopPeer)` | a peer is fully in game |
+| `[OnClientDisconnected]` | `(ICoopPeer, DisconnectInfo)` | a peer leaves |
 
 CardShopCoop creates every behaviour and binds its handlers before `OnEnable`. There is no manual
 registration. If you need more handler code, add another attributed behaviour instead of creating
@@ -178,9 +179,9 @@ if (target != null)
 | You need | Use |
 | --- | --- |
 | A session-wide value | `[GlobalInformation]` + `Global<T>`; add `[HostOnlyInformation]` if clients must not write it |
-| A one-shot event | a `[NetworkMessage]` |
+| A one-shot event or notification | a `[NetworkMessage]` implementing `INetMessage` |
 | Data on an existing object, NPC, or box | extended information |
-| A client action that must feel instant | `ActionMessage` |
+| A command the client predicts and may need to undo | `ActionMessage` |
 | A new connection method | `INetworkingBackend` + `IDatagramTransport` |
 
 Do not create your own object ids. CardShopCoop owns replicated object lifecycle.
@@ -204,9 +205,9 @@ The owner must be an `InteractableObject`, `Customer`, or `Worker` that CardShop
 replicates. A packaging box and a placed decoration are `InteractableObject`s. `T` must be the
 value's concrete type.
 
-The host applies the write and broadcasts it. A client write is an intent; `Get` returns the
-old value until the host echo arrives. Mark a type `[HostOnlyInformation]` when clients must
-not write it.
+The host applies the write and broadcasts it. A client write is sent to the host; `Get` returns
+the old value until the host's answer arrives. Mark a type `[HostOnlyInformation]` when clients
+must not write it.
 
 React with a handler:
 
@@ -228,109 +229,189 @@ private void OnColor(InteractableObject shelf, InformationChange<ShelfColor> cha
 For a session-wide value, use `[GlobalInformation]` + `Global<T>` from the quick start. Join
 baselines are automatic for both extended information and global values.
 
-## 7. Messages and actions (advanced)
+## 7. Messages and actions
 
-There are two message shapes:
+There are two kinds of message.
 
-- `INetMessage` is a one-way message. Its handler returns `void`, may live on any behaviour, and
-  runs wherever the message arrives. Use it for events, announcements, and state you replicate
-  yourself.
-- `ActionMessage` is a client command that the host resolves. It is always recorded in the action
-  ledger, so its handler returns `ActionOutcome` and lives on a `[ServerBehaviour]`.
+- `INetMessage` is a one-way message. Nothing predicts it and nothing undoes it. Use it for
+  announcements, notifications, timers, cosmetic effects, and continuous state such as positions
+  and animations. A client may send one to the host, but it is only a notification.
+- `ActionMessage` is a command to the host. The client makes the change immediately (a prediction),
+  sends the command, and the host either accepts or refuses it. If the host refuses, the client
+  reverses its prediction. Use it for every world interaction another player can affect: picking
+  up, placing, storing, moving, buying, opening, scanning, and so on.
 
-Do not use an action for extended information. A client `SetExtendedInformation` is already a
-host-authoritative intent: the host applies it, broadcasts the result, and late joiners get it in
-the baseline. Multiple clients are ordered by the host; the last host write wins.
+If you are unsure which one to use, ask: can another player change the same thing at the same time?
+If yes, it is an action. A one-way message would leave the two players disagreeing, because there
+is nothing to undo.
+
+### Sending an action
+
+Define a `[NetworkMessage]` class that derives from `ActionMessage`, put the live game objects and
+values the command needs in its fields, and call `Context.Send`:
+
+```csharp
+[NetworkMessage]
+public sealed class MoveObjectAction : ActionMessage
+{
+    public InteractableObject Target;
+    public Vector3 Position;
+
+    [NonSerialized] private Vector3 _previousPosition;
+
+    // Your prediction. Call this yourself on the client before Send; it is normal game code.
+    public void Predict()
+    {
+        _previousPosition = Target.transform.position;
+        Target.transform.position = Position;
+    }
+
+    // Reverse the prediction only.
+    public override void OnUndo(ActionResponseMessage response)
+        => Target.transform.position = _previousPosition;
+
+    // Apply the host's state and clean up anything this action created locally.
+    public override void OnMerge(ActionResponseMessage response)
+        => Target.transform.position = ((MoveObjectResponse)response).Position;
+}
+
+// Client: predict first, then send to the host.
+var action = new MoveObjectAction { Target = target, Position = position };
+action.Predict();
+Context.Send(action);
+```
+
+The framework fills `ActionId`; leave it empty when you send. If the client has no local change to
+make, do not predict; `OnUndo` can stay empty and `OnMerge` still applies the host's response.
+
+### The host handler
+
+The host handles the action, applies it, and returns an `ActionOutcome`:
+
+```csharp
+[NetworkMessage]
+public sealed class MoveObjectResponse : ActionResponseMessage
+{
+    public Vector3 Position;
+}
+
+[ServerBehaviour]
+public sealed class MoveObjectHost : CoopBehaviour
+{
+    [MessageHandler]
+    private ActionOutcome Handle(CoopMessageContext from, MoveObjectAction action)
+    {
+        if (!CanMove(action.Target))
+        {
+            // Refused. The response still carries the host's state for this action.
+            return ActionOutcome.Reject("the object cannot move now", new MoveObjectResponse
+            {
+                Position = action.Target.transform.position,
+            });
+        }
+
+        // Apply the command on the host. The response carries the host's result.
+        action.Target.transform.position = action.Position;
+        return ActionOutcome.Applied(new MoveObjectResponse
+        {
+            Position = action.Target.transform.position,
+        });
+    }
+}
+```
+
+- The handler always applies the command itself. There is no second apply step.
+- `ActionOutcome.Applied(response)` means the command was applied.
+- `ActionOutcome.Reject(reason, response)` means it was not applied. The reason is logged when no
+  response is supplied.
+- A handler for an `ActionMessage` must return `ActionOutcome` and must be on a
+  `[ServerBehaviour]`. Registration fails otherwise.
+- Do not write a handler for an `ActionResponseMessage`. The framework delivers it to the action
+  that sent it. Return the response from the outcome; do not send it yourself.
+
+### Undo and merge
+
+- `OnUndo(response)` runs on the client only when the host refuses the action. Reverse the local
+  prediction and nothing else. Do not apply host state here.
+- `OnMerge(response)` runs on the client exactly once for every action, accepted or refused. On an
+  accept, apply the host's state from the response. On a refusal it runs after `OnUndo`, so use it
+  to apply the host's state and remove local objects, UI, or effects you created for the
+  prediction.
+
+`OnMerge` is the only cleanup point. If your action creates a temporary object or opens a screen,
+remove it there, not in `OnUndo`. When the action returns no response, `OnMerge` receives null;
+check for that before casting.
+
+### State on accept and refuse
+
+If the action changes shared state, the response must carry the host's state after the command.
+Return it from both `Applied` and `Reject` (here `BuyItemResponse` is your own response type):
+
+```csharp
+return ActionOutcome.Reject("not enough money", new BuyItemResponse
+{
+    Price = hostItem.CurrentPrice,
+    Amount = hostItem.Amount,
+});
+```
+
+The same rule applies to an accept. The client replaces its prediction with the response, so a
+missing response leaves the client showing a value the host does not have. An action with no shared
+state (a sound, an animation, a local-only effect) may return no response at all.
+
+If the action publishes an `IActionValue` (an extended-information value carrying `ActionId` and
+`Rejected`), the framework applies it before `OnMerge`, with a null response. This is only for
+state that already lives in extended information.
+
+### When to use `INetMessage` instead
+
+Use `INetMessage` for anything that is not a discrete command another player can interfere with:
+
+- a notification or announcement;
+- a continuous pose, animation, or cosmetic update;
+- a host-to-client state broadcast;
+- a message that only one side needs to hear.
+
+Never predict an `INetMessage`. There is no undo for it and no response, so the sender cannot learn
+that it was wrong. Actions are always reliable; do not mark them `Reliability.Transient`. Transient
+is only for small `INetMessage` updates that can be lost without breaking the game.
+
+Do not use an action for extended information. A client `SetExtendedInformation` is already
+host-authoritative: the host applies it, broadcasts the result, and late joiners get it in the
+baseline.
 
 ```csharp
 // Client: no action, no undo.
 shelf.SetExtendedInformation(new ShelfColor { R = 255, G = 0, B = 0 });
 ```
 
-Use `ActionMessage` only when the client changes something through a game path that must feel
-instant and must be reversed if the host rejects it:
+### Peers
+
+A player is an `ICoopPeer`. `Context.Self` is this player, `Context.Host` is the host, and
+`Context.Peers` lists the other players. There are no connection ids in the peer or message API.
 
 ```csharp
-[NetworkMessage]
-public sealed class MyAction : ActionMessage
+ICoopPeer self = Context.Self;    // this player
+ICoopPeer host = Context.Host;    // the host
+
+foreach (ICoopPeer peer in Context.Peers) // the other players
 {
-    public InteractableObject Target;
-
-    [NonSerialized] private Vector3 _previous;
-
-    // Host apply and client replay. The client performs its own local prediction before
-    // sending; this is not called on the initial send.
-    public override void OnApply() { /* perform the local game change */ }
-
-    // Reverse the local prediction when the host rejects the action.
-    public override void OnUndo(ActionResponseMessage response) { /* restore _previous */ }
-
-    // Optional. Only needed when a custom ActionResponseMessage carries data worth merging
-    // into local state. Accepted responses call this; rejections call OnUndo.
-    public override void OnMerge(ActionResponseMessage response) { /* merge accepted state */ }
-}
-
-// Client: perform the local prediction through the game path, then send the command.
-// Context.Send records it in the action ledger and fills ActionId before it leaves.
-Context.Send(Context.HostConnection, new MyAction { Target = target });
-```
-
-The host handler decides the outcome:
-
-```csharp
-[ServerBehaviour]
-public sealed class MyActionHost : CoopBehaviour
-{
-    [MessageHandler]
-    private ActionOutcome Handle(CoopMessageContext from, MyAction message)
-    {
-        // Refuse without applying anything on the host; the client undoes its prediction.
-        if (message.Target == null)
-        {
-            return ActionOutcome.Reject("target is not available");
-        }
-
-        // Let the framework call message.OnApply() on the host after this returns.
-        // If this handler already applied the command itself, return
-        // ActionOutcome.Applied() instead so the framework does not apply it twice.
-        return ActionOutcome.Apply();
-    }
+    CoopLog.Info(peer.Name + " is " + peer.State);
 }
 ```
 
-- Every `[MessageHandler]` for an `ActionMessage` must return `CardShopCoop.Api.ActionOutcome` and
-  live on a `[ServerBehaviour]`. Registration fails otherwise.
-- `ActionOutcome.Apply(response)` means the handler did not apply the command: the framework calls
-  `OnApply()` on the host, then answers the client.
-- `ActionOutcome.Applied(response)` means the handler already applied the command: the framework
-  skips `OnApply()`.
-- `ActionOutcome.Reject(reason, response)` means the host did not apply the command. The client
-  reverses its prediction with `OnUndo`. The reason is logged when no response is supplied.
-- The `response` argument is optional. Null sends only the framework's internal accept/rollback
-  control, which is all a state-based action needs.
-- `ActionResponseMessage` is the reply base (`Guid ActionId`, `bool Rejected`); the framework fills
-  both fields from the request and the outcome. Responses are routed by the framework: an accepted
-  response calls the action's `OnMerge`, a rejected response calls its `OnUndo`. Never declare a
-  `[MessageHandler]` for an `ActionResponseMessage`; registration fails.
-- `OnApply` runs on the host for `Apply`, and on the client when a rejected action's newer
-  neighbours are replayed. It does not run when the client first sends the action.
-- `OnUndo` restores what was there, not a blank/default value. The host never trusts a client's
-  undo.
-- The client's action ledger orders pending actions per object. On a rejection it undoes the
-  rejected action and every newer pending action on that object, then replays the survivors before
-  applying the host's state. One client cannot undo another client's newer action.
-- `_previous` is local prediction state, never cross-client truth. The host's state carries
-  `ActionId` and `Rejected`; the client applies it over its local undo. An `IActionValue` is a
-  normal extended-information value with those two fields, and is how the framework matches the
-  host's state to the pending action.
-- Reject with `[IntentValidator]` and handle `[IntentRejected]`; return `IntentValidation`, do
-  not throw. A validator rejection never reaches the handler.
-- On accept, publish the resulting `IActionValue` with `ActionId = intent.ActionId` and
-  `Rejected = false`. In `[IntentRejected]`, publish the current value with the same id and
-  `Rejected = true`. A handler that publishes state itself returns `ActionOutcome.Applied()`; the
-  state settles the sender's action.
+| Why | Use |
+| --- | --- |
+| Send to the host (client) | `Context.Send(message)` |
+| Send to every peer (host) | `Context.Broadcast(message)` |
+| Send to every peer except one (host) | `Context.BroadcastExcept(peer, message)` |
+| Send to one peer | `peer.Send(message)` |
+| Read this player and the host | `Context.Self`, `Context.Host` |
+| Read the other players | `Context.Peers` |
+| Get the player behind a peer | `peer.Player` (a `PlayerRef`) |
 
-See `TvActionMessage`/`TvState` in CustomTv for a complete action + authoritative state pair.
+On a client, `peer.Send` only works when the peer is the host. On the host, it works for any peer.
+A client's `Context.Broadcast` sends to the host.
 
 ## 8. Identity and message rules
 
@@ -339,13 +420,18 @@ See `TvActionMessage`/`TvState` in CustomTv for a complete action + authoritativ
 - Put the live `InteractableObject`, `Customer`, or `Worker` in the message. CardShopCoop maps
   it to its stable identity; do not add an id field. A null field means the object is not
   present on that peer; ignore that update.
-- Use `PlayerRef` to name a player. It is presentation data, not authentication. The
-  authenticated sender is `CoopMessageContext.Sender`.
-- The host is authoritative. Clients send intents; the host applies and broadcasts state.
-  Send small deltas during play and one baseline on join.
+- Use `PlayerRef` to name a player. `Context.Self.Player`, `Context.Host.Player`, and
+  `peer.Player` are the `PlayerRef`s for the roster. A `PlayerRef` is presentation data, not
+  authentication.
+- The authenticated sender of a message is `CoopMessageContext.Peer`. Its `Player` is the
+  sender's `PlayerRef` and its `Name` is safe to log. Never trust a player field inside a DTO.
+- Address peers as objects (`ICoopPeer`), never by connection id. `Context.Send`,
+  `Context.Broadcast`, `Context.BroadcastExcept`, and `peer.Send` are the only send calls.
+- The host is authoritative. Clients send actions; the host applies and broadcasts state.
+  Send small updates during play and one baseline to each peer from `[OnFullyJoined]`.
 - Messages are reliable and ordered by default. Use `Reliability.Transient` only for small,
-  loss-tolerant updates.
-- Do not build polling, ACKs, retries, or reconciliation loops on top of messages.
+  loss-tolerant one-way updates. Actions are always reliable.
+- Do not build polling, resend, or retry loops on top of messages.
 - Do not throw from a handler; one exception drops that message and can desynchronize the
   peers until they rejoin.
 - Message changes are patch-level. Both players must run the same version of your mod.
@@ -365,6 +451,10 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 ## 10. Compatibility and troubleshooting
 
 - Both peers need the same CardShopCoop and mod versions. A mismatch refuses the join.
+- `CoopApi.ApiVersion` is the version of the public API your mod was built against. It is separate
+  from the CardShopCoop release version. CardShopCoop 2.3.0 ships API `1.0.0`.
+- A mod built against an older Action API must be rebuilt. The old connection-id send calls, action
+  keys, and `OnApply` hook are gone.
 - Call the API on the Unity main thread.
 - When CardShopCoop may be absent, guard direct API calls and keep them in a separate
   `[MethodImpl(MethodImplOptions.NoInlining)]` method:
@@ -387,7 +477,7 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 | Join refused | Different mod versions or a catalog mismatch |
 | `GetExtendedInformation` returns null | No value yet, or the client is waiting for the host echo |
 | Works alone, not in co-op | Not in a session; check `IsHost`/`IsClient` and the soft dependency |
-| The peers show different values | A client wrote locally instead of sending an intent |
+| The peers show different values | A client sent an `INetMessage` instead of an `ActionMessage`, or the response is missing the host's state |
 | An object field is always null | The object is not present on the receiver |
 
 ## 11. Cheat sheet
@@ -395,16 +485,18 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 | I want to… | Use |
 | --- | --- |
 | Check for co-op / the session | `CoopApi.IsAvailable`, `Context` |
-| Send to the host / everyone | `Context.Send(Context.HostConnection, msg)`, `Context.Broadcast(msg)` |
-| Target one peer | `Context.Send(peer, msg)` |
-| Read the roster | `Context.Self`, `Context.Host`, `Context.Players` |
+| Send to the host (client) | `Context.Send(msg)` |
+| Send to everyone (host) | `Context.Broadcast(msg)` |
+| Send to everyone except one peer (host) | `Context.BroadcastExcept(peer, msg)` |
+| Send to one peer | `peer.Send(msg)` |
+| Read this player, the host, and the other players | `Context.Self`, `Context.Host`, `Context.Peers` |
 | Run code when a peer joins | `[OnClientJoined]`, `[OnFullyJoined]` |
 | Log | `CoopLog.Info/Warn/Error` |
 | Resolve an optional game type | `CoopReflection.OptionalType/Field/Method/Property` |
 | Attach data to an object | `Set/Get/RemoveExtendedInformation` |
 | Attach data to the session | `Global<T>.Value` |
 | React to extended information | `[ExtendedInformationHandler]`, `[GlobalInformationHandler]` |
-| Reject a client intent | `[IntentValidator]`, `[IntentRejected]` |
 | Send a one-way event | a `[NetworkMessage]` `INetMessage` with a `void` handler |
-| Resolve a client command | return `ActionOutcome.Apply/Applied/Reject` from its `[MessageHandler]` |
+| Predict a client command | a `[NetworkMessage]` `ActionMessage`, then `Context.Send` |
+| Resolve a client command | return `ActionOutcome.Applied/Reject` from its `[MessageHandler]` |
 | Add a transport | `CoopApi.RegisterNetworkingBackend` |

@@ -1,3 +1,4 @@
+using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -15,12 +16,22 @@ namespace CardShopCoop.Modules.Tutorial
         /// <summary>The amount vanilla added locally. The host accepts progress only.</summary>
         public float Increment;
 
-        public override void OnApply() => TutorialActions.Add(Condition, Increment);
+        /// <summary>The client's pre-increment state. Restored when the host refuses the
+        /// increment, before the host's rejected authoritative value is applied.</summary>
+        [NonSerialized]
+        internal TutorialState Previous;
 
-        /// <summary>A client registers its own pre-increment state as the ledger undo, so the
-        /// message itself never restores progress.</summary>
         public override void OnUndo(ActionResponseMessage response)
         {
+            TutorialClientBehaviour.ApplyPrevious(Previous);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            // TutorialState is an IActionValue: the extended-information handler applies the
+            // host's post-increment progression before this hook, so there is nothing left to
+            // merge here beyond dropping the local undo snapshot.
+            Previous = null;
         }
     }
 }

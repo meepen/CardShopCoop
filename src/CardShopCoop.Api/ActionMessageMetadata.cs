@@ -4,23 +4,11 @@ using System.Reflection;
 
 namespace CardShopCoop.Api
 {
-    /// <summary>Reflection cache for the optional ActionMessage hooks. The hooks are virtual
-    /// no-ops; the framework only needs to know whether a type opted into one.</summary>
+    /// <summary>Reflection cache for the optional <see cref="ActionMessage.OnUndo"/> hook. The
+    /// hook is a virtual no-op; the framework only needs to know whether a type opted into it.</summary>
     internal static class ActionMessageMetadata
     {
-        private static readonly ConcurrentDictionary<Type, bool> ApplyOverrides = new();
         private static readonly ConcurrentDictionary<Type, bool> UndoOverrides = new();
-
-        internal static bool OverridesOnApply(Type type)
-        {
-            if (type == null)
-            {
-                return false;
-            }
-
-            return ApplyOverrides.GetOrAdd(type, static candidate
-                => Overrides(candidate, nameof(ActionMessage.OnApply)));
-        }
 
         internal static bool OverridesOnUndo(Type type)
         {

@@ -1,4 +1,3 @@
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -34,38 +33,14 @@ namespace CardShopCoop.Modules.World
             Warehouse.ClientApplyState(message);
         }
 
+        /// <summary>A warehouse change another peer made. Our own actions settle through their
+        /// response instead, so this message is always remote state and never re-applies our own
+        /// prediction.</summary>
         [MessageHandler]
         private void HandleWarehouseDelta(MessageContext context, WarehouseDeltaMessage message)
         {
             if (message == null || Warehouse == null)
             {
-                return;
-            }
-
-            var pending = ActionLedger.IsPending(message.ActionId);
-            if (message.IsStore)
-            {
-                if (pending)
-                {
-                    // Our own accepted store. Apply it idempotently: the game already added the
-                    // record, and the host may have canonicalised its order.
-                    WorldAction.Confirm(message, () => Warehouse.ClientApplyDelta(message));
-                    Warehouse.CompleteMutation(message.ActionId);
-                }
-                else
-                {
-                    Warehouse.ClientApplyDelta(message);
-                }
-
-                return;
-            }
-
-            if (pending)
-            {
-                // Our own take already moved the box into the hand. The authoritative echo only
-                // retires the prediction; applying it again would pop/remove/attach twice.
-                WorldAction.Ack(message);
-                Warehouse.CompleteMutation(message.ActionId);
                 return;
             }
 

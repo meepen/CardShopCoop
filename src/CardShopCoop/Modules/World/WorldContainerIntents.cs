@@ -1,15 +1,24 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.World
 {
     /// <summary>A client command against one placed container. The concrete type is the command;
     /// the host validates it and applies it through the game's own path. The container is the live
-    /// placed object, never a list index or key.</summary>
+    /// placed object, never a list index or key. A rejection reverses the local prediction through
+    /// <see cref="OnUndo"/>; every resolution then merges the host's record through
+    /// <see cref="OnMerge"/> exactly once.</summary>
     public abstract class ContainerIntent : WorldIntentMessage
     {
         public InteractableObject Container;
+
+        public override void OnUndo(ActionResponseMessage response)
+            => WorldContainerInteraction.UndoClientAction(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => WorldContainerInteraction.MergeClientAction(this, response);
     }
 
     [NetworkMessage]

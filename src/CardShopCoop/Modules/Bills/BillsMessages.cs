@@ -15,12 +15,11 @@ namespace CardShopCoop.Modules.Bills
     }
 
     /// <summary>Host-authoritative bill values. This is state, not a command: the host owns
-    /// every mutation and broadcasts the result. <see cref="ActionId"/> carries the rejected
-    /// payment prediction the values answer, or empty for ambient accrual.</summary>
+    /// every mutation and broadcasts the result. Ambient accrual and host-local payments use
+    /// this message; a guest's payment is answered with <see cref="BillPaymentResponse"/>.</summary>
     [NetworkMessage]
     public sealed class BillsDeltaMessage : INetMessage
     {
-        public Guid ActionId;
         public byte BillType;
         public bool All;
         public BillValue Value = new();
@@ -30,21 +29,40 @@ namespace CardShopCoop.Modules.Bills
     }
 
     /// <summary>Client command: pay one bill, or every bill when <see cref="BillType"/> is zero.
-    /// The prediction is recorded by the client's action-ledger closures, which capture the bills
-    /// as they were at payment time; the framework hooks carry no per-instance state.</summary>
+    /// The game already zeroed the bills locally; the captured values let <see cref="OnUndo"/>
+    /// reverse exactly that prediction, and <see cref="OnMerge"/> settles the host's absolute
+    /// bill state.</summary>
     [NetworkMessage]
     public sealed class BillPaymentMessage : ActionMessage
     {
         /// <summary>Zero pays all bills; otherwise this is the game's EBillType value.</summary>
         public byte BillType;
 
-        public override void OnApply()
-        {
-        }
+        /// <summary>The bills as they were when the payment was predicted. Local undo state; not
+        /// serialized.</summary>
+        [NonSerialized]
+        public BillValue Rent;
+
+        [NonSerialized]
+        public BillValue Electric;
+
+        [NonSerialized]
+        public BillValue Employee;
 
         public override void OnUndo(ActionResponseMessage response)
-        {
-        }
+            => BillsClientBehaviour.Active?.UndoPayment(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => BillsClientBehaviour.Active?.MergePayment(this, response);
+    }
+
+    /// <summary>The host's absolute bill state after one payment. The framework sets
+    /// <see cref="ActionResponseMessage.Rejected"/>; the values are authoritative whether the
+    /// payment was accepted or refused.</summary>
+    [NetworkMessage]
+    public sealed class BillPaymentResponse : ActionResponseMessage
+    {
+        public BillsDeltaMessage State = new();
     }
 
     public sealed class BillValue

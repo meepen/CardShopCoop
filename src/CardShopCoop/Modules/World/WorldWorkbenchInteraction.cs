@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
@@ -39,52 +40,40 @@ namespace CardShopCoop.Modules.World
         /// mistake an applied mirror for a local player action.</summary>
         internal static bool ApplyingRemote;
 
-        // Client: bumped whenever an authoritative (host) state-set lands on a bench. An edit
-        // prediction captures the epoch it was made in; a later rejection only replays its local
-        // snapshot when no newer authoritative state arrived on the same bench since - otherwise
-        // the undo would roll the bench back over that state. Keyed by the bench object, because
-        // placing or boxing furniture shifts the workbench list and an index is not an identity.
-        private readonly Dictionary<InteractableWorkbench, int> _authorityEpochs = new();
+        /// <summary>Client only: the one live client interaction, so the action hooks the
+        /// framework invokes on a sent message can reach their prediction state. The host never
+        /// predicts, so only a client instance registers here.</summary>
+        private static WorldWorkbenchInteraction _activeClient;
 
-        private int AuthorityEpoch(InteractableWorkbench bench)
-            => bench != null && _authorityEpochs.TryGetValue(bench, out var epoch) ? epoch : 0;
-
-        private void AdvanceAuthorityEpoch(InteractableWorkbench bench)
-        {
-            if (bench != null)
-            {
-                _authorityEpochs[bench] = AuthorityEpoch(bench) + 1;
-            }
-        }
+        /// <summary>Client: the local prediction state of every unresolved bench action, keyed by
+        /// the action object the framework will answer. The action's merge releases the entry.</summary>
+        private readonly Dictionary<ActionMessage, PendingClientAction> _pendingClientActions = new();
 
         private readonly bool _host;
         private readonly Action<INetMessage> _broadcast;
-        private readonly Action<int, INetMessage> _send;
+        private readonly Action<ICoopPeer, INetMessage> _send;
         private readonly Func<bool> _inGame;
 
         internal WorldWorkbenchInteraction(bool host, Action<INetMessage> broadcast,
-            Action<int, INetMessage> send, Func<bool> inGame = null)
+            Action<ICoopPeer, INetMessage> send, Func<bool> inGame = null)
         {
             _host = host;
             _broadcast = broadcast;
             _send = send;
             _inGame = inGame;
+            if (!host)
+            {
+                _activeClient = this;
+            }
         }
 
         internal void Reset()
         {
+            // A join baseline re-runs this on the live client, so the instance stays registered:
+            // only its unresolved predictions are dropped. A shutdown constructs a fresh client
+            // interaction on the next session, which replaces the registration.
             ApplyingRemote = false;
-            _authorityEpochs.Clear();
-        }
-
-        /// <summary>Client: an absolute host state-set that resolves none of this peer's pending
-        /// predictions has just landed (or is about to). Every snapshot captured before it is
-        /// stale, so a later rejection of one of those predictions must not replay it.</summary>
-        internal void MarkAuthorityAdvanced(InteractableWorkbench bench)
-        {
-            // Keyed by the live bench object: a list index would shift when furniture is placed
-            // or boxed up and would advance the wrong epoch.
-            AdvanceAuthorityEpoch(bench);
+            _pendingClientActions.Clear();
         }
 
         private bool InGame() => _inGame == null || _inGame();
@@ -99,7 +88,8 @@ namespace CardShopCoop.Modules.World
             return sm == null ? null : PlacementApi.GetList(sm, KindWorkbench);
         }
 
-        private WorkbenchStateMessage BuildState(InteractableWorkbench bench)
+        /// <summary>The bench's absolute authoritative state, as broadcast to the other peers.</summary>
+        internal WorkbenchStateMessage BuildState(InteractableWorkbench bench)
         {
             var message = new WorkbenchStateMessage
             {
@@ -115,6 +105,26 @@ namespace CardShopCoop.Modules.World
             }
 
             return message;
+        }
+
+        /// <summary>The host's post-action state for the acting client, carried in every
+        /// <see cref="ActionOutcome"/> so a rejected prediction merges onto authority instead of
+        /// inverting a snapshot the host has already moved past.</summary>
+        internal WorkbenchStateResponse BuildResponse(InteractableWorkbench bench)
+        {
+            if (bench == null)
+            {
+                return null;
+            }
+
+            var state = BuildState(bench);
+            return new WorkbenchStateResponse
+            {
+                Bench = state.Bench,
+                StoredTypes = state.StoredTypes,
+                SpawnItemType = state.SpawnItemType,
+                Bundling = state.Bundling,
+            };
         }
 
         private static EItemType GetSpawnType(InteractableWorkbench bench)
@@ -194,17 +204,16 @@ namespace CardShopCoop.Modules.World
             _broadcast(BuildState(bench));
         }
 
-        /// <summary>Host: apply a client's workbench edit to the authoritative list and republish
-        /// the result. Only the edited types travel; the host's own concurrent edits to the same
-        /// bench are preserved instead of being overwritten by the client's whole snapshot.
-        /// Returns false when the bench cannot be resolved so the caller routes a miss through
-        /// <c>ActionHost.Resolve</c> and rolls the client's prediction back, instead of
-        /// reporting success and leaking the prediction for the rest of the session.</summary>
-        internal bool HostApplyOp(WorkbenchOpMessage message)
+        /// <summary>Host: apply a client's workbench edit to the authoritative list. Only the
+        /// edited types travel; the host's own concurrent edits to the same bench are preserved
+        /// instead of being overwritten by the client's whole snapshot. The outcome carries the
+        /// host's absolute post-action state on accept and reject alike; on accept the caller
+        /// publishes that state to the other peers.</summary>
+        internal ActionOutcome HostApplyOp(WorkbenchOpMessage message)
         {
             if (!_host || message == null)
             {
-                return false;
+                return ActionOutcome.Reject("the workbench action is missing");
             }
 
             var bench = message.Bench;
@@ -212,8 +221,10 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning(
                     "[workbench] dropped op with no live bench object.");
-                return false;
+                return ActionOutcome.Reject("the workbench did not resolve to a live object");
             }
+
+            var rejected = BuildResponse(bench);
 
             // The client's edit is untrusted: every type it names must be a real item type, and
             // the result must fit the bench's physical slots. Otherwise a client could mint an
@@ -221,7 +232,7 @@ namespace CardShopCoop.Modules.World
             var capacity = bench.m_PosList?.Count ?? 0;
             if (capacity <= 0)
             {
-                return false;
+                return ActionOutcome.Reject("the workbench has no storage slots", rejected);
             }
 
             if (message.SpawnItemType != EItemType.None
@@ -229,7 +240,7 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op with an invalid spawn type "
                     + message.SpawnItemType + " on bench " + bench.name + ".");
-                return false;
+                return ActionOutcome.Reject("the workbench spawn type is invalid", rejected);
             }
 
             var types = TypesOf(bench);
@@ -238,7 +249,7 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op removing " + removed.Count
                     + " types from a " + capacity + "-slot bench " + bench.name + ".");
-                return false;
+                return ActionOutcome.Reject("the workbench removal exceeds its capacity", rejected);
             }
 
             for (var i = 0; removed != null && i < removed.Count; i++)
@@ -247,7 +258,8 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning("[workbench] rejected op with an invalid removed type "
                         + removed[i] + " on bench " + bench.name + ".");
-                    return false;
+                    return ActionOutcome.Reject("the workbench removal names an invalid item type",
+                        rejected);
                 }
 
                 var at = types.IndexOf(removed[i]);
@@ -262,7 +274,7 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op adding " + added.Count
                     + " types to a " + capacity + "-slot bench " + bench.name + ".");
-                return false;
+                return ActionOutcome.Reject("the workbench addition exceeds its capacity", rejected);
             }
 
             if (types.Count + (added?.Count ?? 0) > capacity)
@@ -270,7 +282,7 @@ namespace CardShopCoop.Modules.World
                 CoopPlugin.Log.LogWarning("[workbench] rejected op that would overfill bench "
                     + bench.name + " (" + types.Count + "+" + (added?.Count ?? 0) + " > "
                     + capacity + ").");
-                return false;
+                return ActionOutcome.Reject("the workbench would be overfilled", rejected);
             }
 
             for (var i = 0; added != null && i < added.Count; i++)
@@ -279,7 +291,8 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning("[workbench] rejected op with an invalid added type "
                         + added[i] + " on bench " + bench.name + ".");
-                    return false;
+                    return ActionOutcome.Reject("the workbench addition names an invalid item type",
+                        rejected);
                 }
 
                 // Vanilla AddItem(addToFront: true) fills the last slot, so the newest item is
@@ -288,10 +301,7 @@ namespace CardShopCoop.Modules.World
             }
 
             SyncBench(bench, types, message.SpawnItemType, message.Bundling);
-            var state = BuildState(bench);
-            state.ActionId = message.ActionId;
-            _broadcast?.Invoke(state);
-            return true;
+            return ActionOutcome.Applied(BuildResponse(bench));
         }
 
         /// <summary>True when <paramref name="type"/> is a real game item type backed by mesh
@@ -302,34 +312,34 @@ namespace CardShopCoop.Modules.World
             => type != EItemType.None && Enum.IsDefined(typeof(EItemType), type);
 
         /// <summary>Host: accept the requesting client's finished bundle. The host is authoritative
-        /// for the bench state: it clears the mirrored bundling animation and republishes. The
-        /// bundle box itself was already minted locally by the acting client, so no box is handed
-        /// out here and nothing needs to be remembered for a rejoin.</summary>
-        internal bool HostCompleteBundle(InteractableWorkbench bench)
+        /// for the bench state: it clears the mirrored bundling animation and answers with the
+        /// resulting state, which the caller publishes to the other peers. The bundle box itself
+        /// was already minted locally by the acting client, so no box is handed out here and
+        /// nothing needs to be remembered for a rejoin.</summary>
+        internal ActionOutcome HostCompleteBundle(WorkbenchBundleMessage message)
         {
-            if (!_host)
+            if (!_host || message == null)
             {
-                return false;
+                return ActionOutcome.Reject("the workbench bundle action is missing");
             }
 
+            var bench = message.Bench;
             if (bench == null)
             {
                 CoopPlugin.Log.LogWarning(
                     "[workbench] dropped bundle completion with no live bench object.");
-                return false;
+                return ActionOutcome.Reject("the workbench did not resolve to a live object");
             }
 
-            var itemType = GetSpawnType(bench);
-            if (itemType == EItemType.None)
+            if (GetSpawnType(bench) == EItemType.None)
             {
-                return false;
+                return ActionOutcome.Reject("the workbench is not bundling", BuildResponse(bench));
             }
 
             // The host's bench was showing the bundle started by the requesting client; stop it
-            // on the game object itself before publishing, so the broadcast reads no bundling.
+            // on the game object itself before answering, so the response reads no bundling.
             HideBundlingAnimation(bench);
-            _broadcast?.Invoke(BuildState(bench));
-            return true;
+            return ActionOutcome.Applied(BuildResponse(bench));
         }
 
         // ---------------- client ----------------
@@ -366,11 +376,9 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            var action = new WorkbenchBundleMessage { Bench = bench };
             HideBundlingAnimation(bench);
-            _send?.Invoke(1, new WorkbenchBundleMessage
-            {
-                Bench = bench,
-            });
+            SendClientAction(action, bench, TypesOf(bench));
         }
 
         /// <summary>Client: forward one predicted workbench edit. <paramref name="before"/> is the
@@ -396,27 +404,14 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var self = this;
-            var epoch = AuthorityEpoch(bench);
-            WorldAction.Submit(WorldAction.WorkbenchScope,
-                new WorkbenchOpMessage
-                {
-                    Bench = bench,
-                    AddedTypes = added,
-                    RemovedTypes = removed,
-                    SpawnItemType = GetSpawnType(bench),
-                    Bundling = IsBundling(bench),
-                },
-                () => self.ReplayItems(bench, after),
-                () =>
-                {
-                    // A newer authoritative bench state supersedes this rejected edit's snapshot;
-                    // replaying the old list would roll the bench back over the host's state.
-                    if (self.AuthorityEpoch(bench) == epoch)
-                    {
-                        self.ReplayItems(bench, before);
-                    }
-                });
+            SendClientAction(new WorkbenchOpMessage
+            {
+                Bench = bench,
+                AddedTypes = added,
+                RemovedTypes = removed,
+                SpawnItemType = GetSpawnType(bench),
+                Bundling = IsBundling(bench),
+            }, bench, before);
         }
 
         /// <summary>Rebuilds a bench's local list from a type sequence. Used to replay or undo a
@@ -452,18 +447,95 @@ namespace CardShopCoop.Modules.World
             SyncBench(bench, message.StoredTypes, message.SpawnItemType, message.Bundling);
         }
 
-        /// <summary>Host: the bench's absolute authoritative state as a refresh for a rejected
-        /// edit, sent to the requester before the generic rollback so the client reconciles to
-        /// authority instead of replaying a snapshot that has moved past it. The empty prediction
-        /// id makes the requester apply it as a state-set, not consume a prediction with it.</summary>
-        internal WorkbenchStateMessage BuildRefresh(InteractableWorkbench bench)
+        /// <summary>Client: reverses one workbench action's local prediction. Called by the
+        /// action's own <see cref="ActionMessage.OnUndo"/>, which the framework runs only when the
+        /// host rejects it.</summary>
+        internal static void UndoClientAction(ActionMessage action)
+            => _activeClient?.UndoPending(action);
+
+        /// <summary>Client: settles one workbench action, applying the host's absolute post-action
+        /// state. Called exactly once per resolution, after the undo when rejected.</summary>
+        internal static void MergeClientAction(ActionMessage action, ActionResponseMessage response)
+            => _activeClient?.MergePending(action, response);
+
+        /// <summary>Client: sends one predicted workbench action and keeps the snapshot its undo
+        /// needs until the action merges. A send failure releases the snapshot before the
+        /// transport failure propagates.</summary>
+        private void SendClientAction(ActionMessage action, InteractableWorkbench bench,
+            List<EItemType> previousTypes)
         {
-            if (!_host)
+            if (action == null)
             {
-                return null;
+                return;
             }
 
-            return bench == null ? null : BuildState(bench);
+            if (_send == null)
+            {
+                CoopPlugin.Log.LogError("WorldWorkbenchInteraction: cannot send "
+                    + action.GetType().Name + "; the workbench send seam is not wired.");
+                return;
+            }
+
+            _pendingClientActions[action] = new PendingClientAction
+            {
+                Bench = bench,
+                PreviousTypes = previousTypes,
+            };
+            try
+            {
+                _send(null, action);
+            }
+            catch
+            {
+                // The action never reached the host, so its merge will not run. Release the local
+                // snapshot before the transport failure propagates.
+                _pendingClientActions.Remove(action);
+                throw;
+            }
+        }
+
+        private void UndoPending(ActionMessage action)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            if (!_pendingClientActions.TryGetValue(action, out var pending))
+            {
+                CoopPlugin.Log.LogWarning("WorldWorkbenchInteraction: rejected "
+                    + action.GetType().Name + " has no local prediction to reverse.");
+                return;
+            }
+
+            if (pending.Bench != null && pending.PreviousTypes != null)
+            {
+                ReplayItems(pending.Bench, pending.PreviousTypes);
+            }
+        }
+
+        private void MergePending(ActionMessage action, ActionResponseMessage response)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            _pendingClientActions.Remove(action);
+            if (response is not WorkbenchStateResponse state || state.Bench == null)
+            {
+                CoopPlugin.Log.LogWarning("WorldWorkbenchInteraction: " + action.GetType().Name
+                    + " settled without authoritative workbench state.");
+                return;
+            }
+
+            SyncBench(state.Bench, state.StoredTypes, state.SpawnItemType, state.Bundling);
+        }
+
+        private sealed class PendingClientAction
+        {
+            internal InteractableWorkbench Bench;
+            internal List<EItemType> PreviousTypes;
         }
 
         // ---------------- game-state apply ----------------
@@ -741,5 +813,17 @@ namespace CardShopCoop.Modules.World
         /// <summary>The game's own save-load recipe for materializing an Item by type.</summary>
         internal static Item SpawnItem(EItemType itemType, Transform parent)
             => Runtime.ItemVisuals.Spawn(itemType, parent);
+    }
+
+    /// <summary>Host -> the acting client: the workbench's absolute post-action state. The list,
+    /// spawn tier and bundling flag are authoritative on accept and reject alike, so the client's
+    /// merge lands on reality instead of inverting a snapshot authority has moved past.</summary>
+    [NetworkMessage]
+    public sealed class WorkbenchStateResponse : ActionResponseMessage
+    {
+        public InteractableWorkbench Bench;
+        public List<EItemType> StoredTypes = new();
+        public EItemType SpawnItemType;
+        public bool Bundling;
     }
 }

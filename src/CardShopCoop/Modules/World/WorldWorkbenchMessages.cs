@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.World
@@ -32,6 +33,12 @@ namespace CardShopCoop.Modules.World
         public List<EItemType> RemovedTypes = new();
         public EItemType SpawnItemType;
         public bool Bundling;
+
+        public override void OnUndo(ActionResponseMessage response)
+            => WorldWorkbenchInteraction.UndoClientAction(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => WorldWorkbenchInteraction.MergeClientAction(this, response);
     }
 
     /// <summary>Client -> host: the acting player finished the bundling animation. The acting
@@ -42,5 +49,11 @@ namespace CardShopCoop.Modules.World
     {
         /// <summary>The live bench whose bundle the acting player finished.</summary>
         public InteractableWorkbench Bench;
+
+        public override void OnUndo(ActionResponseMessage response)
+            => WorldWorkbenchInteraction.UndoClientAction(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => WorldWorkbenchInteraction.MergeClientAction(this, response);
     }
 }

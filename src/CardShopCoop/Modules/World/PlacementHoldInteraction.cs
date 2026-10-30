@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Api;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using HarmonyLib;
@@ -31,7 +32,7 @@ namespace CardShopCoop.Modules.World
             internal InteractableObject Obj;
             internal GameObject Ghost;
             internal Material Material;
-            internal int MoverConnectionId;
+            internal PlayerRef Mover;
             internal int OriginalLayer;
             internal bool OriginalValidAreaActive;
             internal bool OriginalBoxColliderEnabled;
@@ -49,8 +50,8 @@ namespace CardShopCoop.Modules.World
 
         private readonly bool _host;
         private readonly Action<INetMessage> _broadcast;
-        private readonly Action<int, INetMessage> _send;
-        private readonly Dictionary<InteractableObject, int> _holders =
+        private readonly Action<ICoopPeer, INetMessage> _send;
+        private readonly Dictionary<InteractableObject, PlayerRef> _holders =
             new(PlacementObjectComparer.Instance);
         private readonly Dictionary<InteractableObject, RemoteHold> _remote =
             new(PlacementObjectComparer.Instance);
@@ -83,7 +84,7 @@ namespace CardShopCoop.Modules.World
             => obj != null && _remote.ContainsKey(obj);
 
         internal PlacementHoldInteraction(bool host, Action<INetMessage> broadcast,
-            Action<int, INetMessage> send)
+            Action<ICoopPeer, INetMessage> send)
         {
             _host = host;
             _broadcast = broadcast;
@@ -152,7 +153,7 @@ namespace CardShopCoop.Modules.World
             // decoration has no placed object yet, so its hold is kept local and dropped from the
             // network rather than inventing an identifier.
             _localBeginSent = PlacementInterop.HasSharedIdentity(obj);
-            var message = BuildBeginMessage(obj, 0);
+            var message = BuildBeginMessage(obj);
             _localStopSnap = message.StopSnap;
             _localIsFlipped = message.IsFlipped;
             CoopPlugin.Log.LogInfo("[placement-hold] local begin entity="
@@ -163,13 +164,14 @@ namespace CardShopCoop.Modules.World
             {
                 if (_host)
                 {
-                    _holders[obj] = 0;
-                    message.MoverConnectionId = 0;
+                    message.Mover = LocalPlayer;
+                    _holders[obj] = message.Mover;
                     _broadcast(message);
                 }
                 else
                 {
-                    _send(1, CreateBeginRequest(message));
+                    // The host stamps the holder from the authenticated sender.
+                    SendToHost(CreateBeginRequest(message));
                 }
             }
             else
@@ -207,7 +209,7 @@ namespace CardShopCoop.Modules.World
 
             if (_host)
             {
-                if (_holders.TryGetValue(ended, out var mover) && mover == 0)
+                if (_holders.TryGetValue(ended, out var mover) && IsLocalMover(mover))
                 {
                     _holders.Remove(ended);
                 }
@@ -216,7 +218,7 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
-                _send(1, new PlacementHoldEndRequestMessage { Entity = ended });
+                SendToHost(new PlacementHoldEndRequestMessage { Entity = ended });
             }
 
             if (_remote.Count > 0)
@@ -299,7 +301,7 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
-                _send(1, new PlacementHoldRotationRequestMessage
+                SendToHost(new PlacementHoldRotationRequestMessage
                 {
                     Entity = _localObject,
                     Rotation = rotation,
@@ -325,7 +327,7 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
-                _send(1, new PlacementHoldStateRequestMessage
+                SendToHost(new PlacementHoldStateRequestMessage
                 {
                     Entity = _localObject,
                     StopSnap = _localStopSnap,
@@ -384,41 +386,47 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>True when <paramref name="connectionId"/> owns the hold for
-        /// <paramref name="obj"/>, used to validate a rotate/state request.</summary>
-        internal bool IsHeldBy(InteractableObject obj, int connectionId)
-            => obj != null && _holders.TryGetValue(obj, out var mover) && mover == connectionId;
+        /// <summary>True when <paramref name="peer"/> owns the hold for <paramref name="obj"/>,
+        /// used to validate a rotate/state request.</summary>
+        internal bool IsHeldBy(InteractableObject obj, ICoopPeer peer)
+            => obj != null && _holders.TryGetValue(obj, out var mover)
+                && IsSamePlayer(mover, peer);
 
-        /// <summary>Host authority: grants the hold to <paramref name="connectionId"/> when the
-        /// object is free, returning the broadcast to send.</summary>
-        internal bool HostGrant(InteractableObject obj, int connectionId,
+        /// <summary>Host authority: grants the hold to <paramref name="peer"/> when the object is
+        /// free, returning the broadcast to send. The granted message carries the holder's
+        /// authenticated roster identity, never a connection id.</summary>
+        internal bool HostGrant(InteractableObject obj, ICoopPeer peer,
             PlacementHoldBeginMessage request, out PlacementHoldBeginMessage granted)
         {
             granted = null;
-            if (obj == null)
+            var mover = peer?.Player;
+            if (obj == null || mover == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] cannot grant a hold entity="
+                    + PlacementInterop.Describe(obj) + " peer=" + (peer?.Name ?? "<none>")
+                    + ": the peer has no roster identity.");
+                return false;
+            }
+
+            if (_holders.TryGetValue(obj, out var existing) && !existing.Equals(mover))
             {
                 return false;
             }
 
-            if (_holders.TryGetValue(obj, out var existing) && existing != connectionId)
-            {
-                return false;
-            }
-
-            _holders[obj] = connectionId;
+            _holders[obj] = mover;
             granted = new PlacementHoldBeginMessage
             {
                 Entity = obj,
-                MoverConnectionId = connectionId,
+                Mover = mover,
             };
             CopyBeginState(request, granted);
             return true;
         }
 
-        internal bool HostRelease(InteractableObject obj, int connectionId)
+        internal bool HostRelease(InteractableObject obj, ICoopPeer peer)
         {
-            if (obj == null || !_holders.TryGetValue(obj, out var existing)
-                || existing != connectionId)
+            if (obj == null || peer == null || !_holders.TryGetValue(obj, out var existing)
+                || !IsSamePlayer(existing, peer))
             {
                 return false;
             }
@@ -427,12 +435,11 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        /// <summary>Ends the hold for <paramref name="obj"/> when <paramref name="connectionId"/>
-        /// owns it, and tells the peers. Used when another action (boxing up) supersedes the hold.</summary>
-        internal bool EndIfHeldBy(InteractableObject obj, int connectionId)
+        /// <summary>Ends the hold for <paramref name="obj"/> when <paramref name="peer"/> owns it,
+        /// and tells the peers. Used when another action (boxing up) supersedes the hold.</summary>
+        internal bool EndIfHeldBy(InteractableObject obj, ICoopPeer peer)
         {
-            if (obj == null || !_holders.TryGetValue(obj, out var mover)
-                || mover != connectionId)
+            if (!HostRelease(obj, peer))
             {
                 return false;
             }
@@ -444,12 +451,17 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>Releases everything a disconnected peer held, appending each object to
         /// <paramref name="released"/> so the caller can broadcast the end.</summary>
-        internal void ReleaseMover(int connectionId, List<InteractableObject> released)
+        internal void ReleaseMover(ICoopPeer peer, List<InteractableObject> released)
         {
             released.Clear();
+            if (peer == null)
+            {
+                return;
+            }
+
             foreach (var pair in _holders)
             {
-                if (pair.Value == connectionId)
+                if (IsSamePlayer(pair.Value, peer))
                 {
                     released.Add(pair.Key);
                 }
@@ -473,10 +485,18 @@ namespace CardShopCoop.Modules.World
             }
 
             var obj = message.Entity;
-            var local = IsLocalMover(message.MoverConnectionId);
-            _holders[obj] = message.MoverConnectionId;
+            var mover = message.Mover;
+            if (mover == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped begin for entity="
+                    + PlacementInterop.Describe(obj) + " with no holder identity.");
+                return;
+            }
+
+            var local = IsLocalMover(mover);
+            _holders[obj] = mover;
             CoopPlugin.Log.LogInfo("[placement-hold] begin entity="
-                + PlacementInterop.Describe(obj) + " mover=" + message.MoverConnectionId
+                + PlacementInterop.Describe(obj) + " mover=" + mover
                 + " local=" + local + " stopSnap=" + message.StopSnap
                 + " flipped=" + message.IsFlipped + ".");
 
@@ -617,7 +637,7 @@ namespace CardShopCoop.Modules.World
 
         private void UpdateRemoteAim(RemoteHold hold)
         {
-            if (PresenceApi.TryGetLatestPeerCameraForHolder(hold.MoverConnectionId,
+            if (PresenceApi.TryGetLatestPeerCameraForHolder(hold.Mover.Id,
                 out var cameraPosition, out var cameraRotation))
             {
                 hold.CameraPosition = cameraPosition;
@@ -631,7 +651,7 @@ namespace CardShopCoop.Modules.World
                 {
                     hold.AimUnavailableLogged = true;
                     CoopPlugin.Log.LogWarning("[placement-hold] no camera sample for mover="
-                        + hold.MoverConnectionId + " entity="
+                        + hold.Mover + " entity="
                         + PlacementInterop.Describe(hold.Obj)
                         + "; keeping the last inferred target.");
                 }
@@ -683,12 +703,11 @@ namespace CardShopCoop.Modules.World
                 ? manager.m_PreviewMeshValidColor : manager.m_PreviewMeshInvalidColor);
         }
 
-        private static PlacementHoldBeginMessage BuildBeginMessage(InteractableObject obj, int mover)
+        private static PlacementHoldBeginMessage BuildBeginMessage(InteractableObject obj)
         {
             var message = new PlacementHoldBeginMessage
             {
                 Entity = obj,
-                MoverConnectionId = mover,
                 StopSnap = PlacementInterop.ReadStopSnap(),
                 IsFlipped = PlacementInterop.ReadIsFlipped(obj),
                 RayDistance = PlacementInterop.ReadLocalRayDistance(),
@@ -706,11 +725,9 @@ namespace CardShopCoop.Modules.World
         private static PlacementHoldBeginRequestMessage CreateBeginRequest(
             PlacementHoldBeginMessage source)
         {
-            var request = new PlacementHoldBeginRequestMessage
-            {
-                Entity = source.Entity,
-                MoverConnectionId = 0,
-            };
+            // The request carries only what the mover observed about its own hold. The host stamps
+            // the holder from the authenticated sender, so a sender cannot name someone else.
+            var request = new PlacementHoldBeginRequestMessage { Entity = source.Entity };
             CopyBeginState(source, request);
             return request;
         }
@@ -749,8 +766,15 @@ namespace CardShopCoop.Modules.World
             SetDashedLines(false);
         }
 
-        private static bool IsLocalMover(int connectionId)
-            => connectionId == CoopCore.LocalConnectionId;
+        /// <summary>This machine's roster identity, used as the host-side holder of a local hold.</summary>
+        private static PlayerRef LocalPlayer => PeerHandle.Self().Player;
+
+        private void SendToHost(INetMessage message) => _send(PeerHandle.Host(), message);
+
+        private static bool IsLocalMover(PlayerRef mover) => mover != null && mover.IsSelf;
+
+        private static bool IsSamePlayer(PlayerRef owner, ICoopPeer peer)
+            => owner != null && peer != null && owner.Equals(peer.Player);
 
         private void StartRemote(InteractableObject obj, PlacementHoldBeginMessage message)
         {
@@ -803,7 +827,7 @@ namespace CardShopCoop.Modules.World
                 Obj = obj,
                 Ghost = ghost,
                 Material = material,
-                MoverConnectionId = message.MoverConnectionId,
+                Mover = message.Mover,
                 OriginalLayer = originalLayer,
                 OriginalValidAreaActive = originalValidAreaActive,
                 OriginalBoxColliderEnabled = originalBoxEnabled,
@@ -827,7 +851,7 @@ namespace CardShopCoop.Modules.World
             }
 
             CoopPlugin.Log.LogInfo("[placement-hold] remote begin entity="
-                + PlacementInterop.Describe(obj) + " mover=" + message.MoverConnectionId
+                + PlacementInterop.Describe(obj) + " mover=" + message.Mover
                 + " preview=" + (ghost != null) + " material=" + (material != null)
                 + " pickupMesh=" + (obj.m_PickupObjectMesh != null)
                 + " package=" + (package != null) + " camera=" + message.HasCamera

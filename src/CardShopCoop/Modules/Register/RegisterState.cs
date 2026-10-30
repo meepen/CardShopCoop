@@ -64,12 +64,14 @@ namespace CardShopCoop.Modules.Register
     /// <summary>
     /// The extended-information value: one register state plus the correlation metadata the
     /// transport needs. Keeping <see cref="ActionId"/> here leaves <see cref="RegisterState"/>
-    /// pure domain data, and <see cref="Rejected"/> distinguishes a rejection re-anchor (undo the
-    /// target before applying) from an accepted echo (retire the target without undoing it).
+    /// pure domain data, and <see cref="Rejected"/> tells the acting client to undo its prediction
+    /// before this snapshot is applied. As an <see cref="IActionValue"/> the framework settles the
+    /// correlated action exactly once around the client's snapshot handler.
     /// Host-only: a client writes register state through its validated intent lane.
     /// </summary>
     [HostOnlyInformation]
-    internal sealed class RegisterSnapshot : ExtendGameObjectInformation<InteractableCashierCounter>
+    internal sealed class RegisterSnapshot : ExtendGameObjectInformation<InteractableCashierCounter>,
+        IActionValue
     {
         public RegisterState State
         {

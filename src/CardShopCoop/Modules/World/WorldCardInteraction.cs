@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Grading;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.SaveTransfer;
 using CardShopCoop.Runtime;
 
@@ -14,8 +14,8 @@ namespace CardShopCoop.Modules.World
         private readonly bool _host;
 
         internal Action<INetMessage> BroadcastOverride;
-        internal Action<int, INetMessage> RelayOverride;
-        internal Action<int, INetMessage> SendOverride;
+        internal Action<ICoopPeer, INetMessage> RelayOverride;
+        internal Action<ICoopPeer, INetMessage> SendOverride;
 
         internal readonly WorldContainerInteraction Containers;
         internal readonly WorldMarketInteraction Market;
@@ -26,8 +26,8 @@ namespace CardShopCoop.Modules.World
         /// <summary>Client: true while a module owns a card-mutating game action and carries the
         /// effect in its own intent, so the card patches must not register a second world
         /// prediction and forward it. The game still performs the mutation (vanilla is never
-        /// stopped); only the duplicate forward is skipped, the same shape as EconomyActionScope
-        /// on the wallet side.</summary>
+        /// stopped); only the duplicate forward is skipped, the same shape as the wallet's
+        /// suppression guard.</summary>
         internal static bool SuppressClientCardForwarding;
 
         /// <summary>Opens the card-forwarding guard for one module-owned action. Nesting is
@@ -59,25 +59,36 @@ namespace CardShopCoop.Modules.World
 
         internal bool InGameLevel() => _context.InGame();
 
-        private int ConnectionCount => _context.ConnectionIds?.Invoke()?.Count ?? 0;
+        /// <summary>The live card interaction for this machine (the host's world owner or the
+        /// client's). Message hooks use it because a settled action can run outside a module
+        /// instance's normal call path.</summary>
+        internal static WorldCardInteraction Current
+            => WorldHostBehaviour.ActiveCards ?? WorldClientBehaviour.ActiveCards;
 
-        private List<int> ConnectionIds()
-        {
-            var ids = _context.ConnectionIds?.Invoke();
-            return ids == null ? new List<int>() : new List<int>(ids);
-        }
+        private int PeerCount => _context.Peers?.Count ?? 0;
 
         internal static InventoryBase Inv()
             => SceneRef<InventoryBase>.Get();
 
-        private void Send(int connectionId, INetMessage message)
+        private void Send(ICoopPeer peer, INetMessage message)
         {
+            if (peer == null)
+            {
+                throw new ArgumentNullException(nameof(peer));
+            }
+
             if (SendOverride != null)
             {
-                SendOverride(connectionId, message);
+                SendOverride(peer, message);
                 return;
             }
-            _context.Send(connectionId, message);
+
+            peer.Send(message);
+        }
+
+        private void SendToHost(INetMessage message)
+        {
+            Send(_context.Host, message);
         }
 
         private void Broadcast(INetMessage message)
@@ -91,6 +102,47 @@ namespace CardShopCoop.Modules.World
                 _context.Broadcast(message);
             }
         }
+
+        private void BroadcastExcept(ICoopPeer peer, INetMessage message)
+        {
+            if (peer == null || peer.IsSelf)
+            {
+                Broadcast(message);
+                return;
+            }
+
+            if (RelayOverride != null)
+            {
+                RelayOverride(peer, message);
+            }
+            else
+            {
+                _context.BroadcastExcept(peer, message);
+            }
+        }
+
+        private ICoopPeer FindPeer(int playerId)
+        {
+            if (playerId <= 0)
+            {
+                return null;
+            }
+
+            var peers = _context.Peers;
+            for (var i = 0; i < peers.Count; i++)
+            {
+                var player = peers[i]?.Player;
+                if (player != null && player.Id == playerId)
+                {
+                    return peers[i];
+                }
+            }
+
+            return null;
+        }
+
+        private static int PlayerId(CoopMessageContext context)
+            => context?.Peer?.Player?.Id ?? 0;
 
         internal void FlushWorldReady()
         {
@@ -146,7 +198,7 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
-                Send(1, new CardDeltaRequestMessage
+                SendToHost(new CardDeltaRequestMessage
                 {
                     IsAdd = isAdd,
                     Amount = amount,
@@ -156,8 +208,8 @@ namespace CardShopCoop.Modules.World
         }
 
         /// <summary>Records one inventory mutation the game ALREADY performed (the hook observes
-        /// vanilla from a postfix). The apply/undo closures redo and reverse the same change through
-        /// the game's own methods, ready for a rejection replay; the game owns the local mutation.</summary>
+        /// vanilla from a postfix). The action reverses the same change through the game's own
+        /// methods when the host refuses it; the game owns the local mutation.</summary>
         internal bool PredictClientCardDelta(CardData card, int amount, bool isAdd)
         {
             if (_host || ApplyingRemoteCards || card == null || amount <= 0
@@ -172,35 +224,18 @@ namespace CardShopCoop.Modules.World
                 snapshot.cardGrade = GradingApi.Encoded(card);
             }
 
-            var intent = new CardDeltaRequestMessage
+            SendToHost(new CardDeltaRequestMessage
             {
                 IsAdd = isAdd,
                 Amount = amount,
                 Card = snapshot,
-            };
-            var binding = isAdd ? null : CreateBinderTakeBinding();
-            WorldAction.Submit(WorldAction.CardsScope, intent,
-                () =>
+                Prediction = new CardActionPrediction
                 {
-                    ApplyPredictedCardDelta(snapshot, amount, isAdd);
-                    NotifyCardsChanged();
+                    // Only a take that actually moves a card into the hand can leave a spawned
+                    // object to clean up after a refusal.
+                    Binding = isAdd ? null : CreateBinderTakeBinding(),
                 },
-                () =>
-                {
-                    ApplyPredictedCardDelta(snapshot, amount, !isAdd);
-                    NotifyCardsChanged();
-                },
-                () =>
-                {
-                    // Only THIS removal's own rejection returns the card and despawns its hand
-                    // object; a cascade undo of a later prediction must not clear a selection
-                    // that was legitimately reserved or drop a card the game did not spawn here.
-                    if (!isAdd)
-                    {
-                        DespawnRejectedBinderTake(binding, snapshot);
-                        GradingApi.OnCardRemovalRefused(snapshot, amount);
-                    }
-                });
+            });
             return true;
         }
 
@@ -240,42 +275,20 @@ namespace CardShopCoop.Modules.World
                 snapshot.cardGrade = GradingApi.Encoded(card);
             }
 
-            var intent = new GradedRemoveRequestMessage { Card = snapshot };
-            var binding = CreateBinderTakeBinding();
-            // A local removal that changed nothing (a stale album slot whose certificate left
-            // through another player) must never be put back by the rollback: the row is gone in
-            // the shared album, and restoring it would mint a ghost certificate.
-            var guard = new GradedRemovalGuard { Superseded = !removedLocally };
-            var actionId = WorldAction.Submit(WorldAction.CardsScope, intent,
-                () =>
+            var intent = new GradedRemoveRequestMessage
+            {
+                Card = snapshot,
+                // A local removal that changed nothing (a stale album slot whose certificate left
+                // through another player) must never be put back by the rollback: the row is gone in
+                // the shared album, and restoring it would mint a ghost certificate.
+                Prediction = new CardActionPrediction
                 {
-                    // A superseded pick's net local effect is zero (its row was already gone):
-                    // replaying the removal must not delete a row an authoritative event has
-                    // since put back.
-                    if (guard.Superseded)
-                    {
-                        return;
-                    }
-
-                    ApplyPredictedGradedRemoval(snapshot);
-                    NotifyCardsChanged();
+                    Binding = CreateBinderTakeBinding(),
+                    Guard = new GradedRemovalGuard { Superseded = !removedLocally },
                 },
-                () =>
-                {
-                    // A competing accepted removal of this same certificate means the shared row
-                    // is already gone; putting it back would mint a ghost certificate.
-                    if (!guard.Superseded)
-                    {
-                        ApplyPredictedCardDelta(snapshot, 1, true);
-                        NotifyCardsChanged();
-                    }
-                },
-                () =>
-                {
-                    DespawnRejectedBinderTake(binding, snapshot);
-                    GradingApi.OnCardRemovalRefused(snapshot, 1);
-                });
-            RegisterGradedRemovalGuard(actionId, guard, snapshot);
+            };
+            SendToHost(intent);
+            RegisterGradedRemovalGuard(intent.ActionId, intent.Prediction.Guard, snapshot);
             return true;
         }
 
@@ -292,7 +305,19 @@ namespace CardShopCoop.Modules.World
                         GradingApi.Remember(card);
                     }
 
-                    CPlayerData.AddCard(card, amount);
+                    if (card.cardGrade > 0)
+                    {
+                        // CPlayerData.AddCard stores exactly ONE graded row per call, so a
+                        // multi-copy prediction must call it once per copy to match vanilla.
+                        for (var i = 0; i < amount; i++)
+                        {
+                            CPlayerData.AddCard(SnapshotCard(card), 1);
+                        }
+                    }
+                    else
+                    {
+                        CPlayerData.AddCard(card, amount);
+                    }
                 }
                 else if (card.cardGrade > 0)
                 {
@@ -305,20 +330,6 @@ namespace CardShopCoop.Modules.World
                 {
                     CPlayerData.ReduceCard(card, amount);
                 }
-            }
-            finally
-            {
-                ApplyingRemoteCards = previousRemote;
-            }
-        }
-
-        private static void ApplyPredictedGradedRemoval(CardData card)
-        {
-            var previousRemote = ApplyingRemoteCards;
-            ApplyingRemoteCards = true;
-            try
-            {
-                CPlayerData.RemoveGradedCard(card, ignoreGradedCardIndex: true);
             }
             finally
             {
@@ -383,17 +394,18 @@ namespace CardShopCoop.Modules.World
             }
 
             // The game already applied every change in the scope; record it as post-hoc
-            // prediction(s) so a rejection can replay it, without re-applying anything the game
+            // prediction(s) so a rejection can reverse it, without re-applying anything the game
             // already did. A pack-opener reveal can exceed the per-batch wire cap, so split into
             // capped chunks (each its own prediction); a bundle stays a single chunk.
             for (var offset = 0; offset < entries.Count; offset += CardDeltaBatchMax)
             {
                 var count = Math.Min(CardDeltaBatchMax, entries.Count - offset);
                 var chunk = entries.GetRange(offset, count);
-                var message = new CardDeltaBatchRequestMessage { Deltas = chunk };
-                WorldAction.Submit(WorldAction.CardsScope, message,
-                    () => ApplyPredictedCardBatch(chunk, false),
-                    () => ApplyPredictedCardBatch(chunk, true));
+                SendToHost(new CardDeltaBatchRequestMessage
+                {
+                    Deltas = chunk,
+                    Predicted = true,
+                });
             }
         }
 
@@ -415,21 +427,6 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        internal void SendCardDeltaTo(int connectionId, CardData card, int amount, bool isAdd)
-        {
-            if (!_host || ConnectionCount == 0 || card == null || amount <= 0)
-            {
-                return;
-            }
-
-            Send(connectionId, new CardDeltaMessage
-            {
-                IsAdd = isAdd,
-                Amount = amount,
-                Card = SnapshotCard(card),
-            });
-        }
-
         internal void ForwardGradedRemoval(CardData card)
         {
             if (card == null || card.cardGrade <= 0)
@@ -443,79 +440,162 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
-                Send(1, new GradedRemoveRequestMessage { Card = SnapshotCard(card) });
+                SendToHost(new GradedRemoveRequestMessage { Card = SnapshotCard(card) });
             }
         }
 
-        internal bool HandleCardDelta(int connectionId, ICardDeltaSource message)
+        // ---------------- authoritative card state (host -> clients) ----------------
+
+        /// <summary>Applies one authoritative card delta. The host excludes the actor from its
+        /// broadcast, so this machine's own prediction is settled by its action response only.
+        /// The player identity is kept for call-site symmetry; authoritative state does not need it.
+        /// </summary>
+        internal void HandleCardDelta(int playerId, CardDeltaMessage message)
         {
-            if (_host && message == null)
+            if (message == null)
             {
-                return false;
+                return;
             }
 
-            var applied = ApplyOrHoldCardDelta(connectionId, message.IsAdd, message.Amount,
-                message.Card, out var relayAnyway, message.ActionId);
+            ApplyOrHoldCardDelta(message.IsAdd, message.Amount, message.Card, out _);
+        }
+
+        /// <summary>Applies one authoritative atomic card movement. See
+        /// <see cref="HandleCardDelta(int, CardDeltaMessage)"/>.</summary>
+        internal void HandleCardDeltaBatch(int playerId, CardDeltaBatchMessage message)
+        {
+            if (message?.Deltas == null)
+            {
+                throw new InvalidOperationException("Card delta batch has no delta list.");
+            }
+
+            for (var i = 0; i < message.Deltas.Count; i++)
+            {
+                ApplyOrHoldCardDelta(message.Deltas[i].IsAdd, message.Deltas[i].Amount,
+                    message.Deltas[i].Card, out _);
+            }
+        }
+
+        /// <summary>Applies one authoritative graded-album removal.</summary>
+        internal void HandleGradedRemove(int playerId, GradedRemoveMessage message)
+        {
+            if (message?.Card == null)
+            {
+                return;
+            }
+
+            if (!InGameLevel())
+            {
+                _pendingCardDeltas.Add(new PendingCard
+                {
+                    IsAdd = false,
+                    Amount = 1,
+                    Card = SnapshotCard(message.Card),
+                });
+                return;
+            }
+
+            ApplyTrustedCardDelta(false, 1, message.Card);
+        }
+
+        // ---------------- host actions ----------------
+
+        /// <summary>One client's card change. The host applies it and publishes the resulting
+        /// delta to every peer except the actor; the actor settles through the action response.</summary>
+        internal ActionOutcome HandleCardDelta(CoopMessageContext context, CardDeltaRequestMessage message)
+        {
+            if (!_host || !InGameLevel() || message?.Card == null)
+            {
+                return ActionOutcome.Reject("the card action is not ready");
+            }
+
+            var playerId = PlayerId(context);
+            var applied = ApplyCardDelta(message.IsAdd, message.Amount, message.Card,
+                out var relayAnyway);
             if (!applied && !relayAnyway)
             {
-                return false;
+                return ActionOutcome.Reject("the host refused the card change",
+                    BuildCardResult(message.Card));
             }
 
-            if (_host && !message.IsAdd && !applied && GradedRemoveUncovered(message.Card))
+            if (!message.IsAdd && !applied && GradedRemoveUncovered(message.Card))
             {
-                // A graded removal that traveled on the CardDelta path (a defense for senders
-                // that classify it as a plain reduce): the host has the card set and no matching
-                // certificate left, so the pick lost the race. The authoritative removal goes
-                // out with NO prediction id (sender reconciles to it before the rollback; a
-                // third peer still drops a stale copy), then the sender is refused.
-                Broadcast(new CardDeltaMessage
+                // A graded removal that traveled on the CardDelta path (a defence for senders that
+                // classify it as a plain reduce): the host has the card set and no matching
+                // certificate left, so the pick lost the race. The authoritative removal still goes
+                // to every other peer, and the actor's response carries the host's count so its
+                // rollback cannot mint a ghost certificate.
+                BroadcastExcept(context.Peer, new CardDeltaMessage
                 {
-                    ActionId = Guid.Empty,
                     IsAdd = false,
                     Amount = message.Amount,
                     Card = SnapshotCard(message.Card),
                 });
+                return ActionOutcome.Reject("the host no longer has that card",
+                    BuildCardResult(message.Card));
+            }
+
+            if (message.IsAdd)
+            {
+                ConsumeGradingOwnership(playerId, message.Card, message.Amount);
+            }
+            else if (!relayAnyway)
+            {
+                RecordGradingOwnership(playerId, message.Card, message.Amount);
+            }
+
+            BroadcastExcept(context.Peer, new CardDeltaMessage
+            {
+                IsAdd = message.IsAdd,
+                Amount = message.Amount,
+                Card = SnapshotCard(message.Card),
+            });
+            return ActionOutcome.Applied(BuildCardResult(message.Card));
+        }
+
+        /// <summary>One client's bulk card movement. The batch is atomic on the host, and the
+        /// response carries the resulting host count for every card it touched.</summary>
+        internal ActionOutcome HandleCardDeltaBatch(CoopMessageContext context,
+            CardDeltaBatchRequestMessage message)
+        {
+            if (!_host || !InGameLevel() || message?.Deltas == null)
+            {
+                return ActionOutcome.Reject("the card batch is not ready");
+            }
+
+            if (message.Deltas.Count == 0)
+            {
+                return ActionOutcome.Reject("the card batch carries no deltas");
+            }
+
+            var applied = ApplyHostCardBatch(context.Peer, message, requireAllApplied: false);
+            var result = BuildCardBatchResult(message.Deltas);
+            return applied
+                ? ActionOutcome.Applied(result)
+                : ActionOutcome.Reject("the host refused the card batch", result);
+        }
+
+        /// <summary>Applies a host-derived atomic card movement (the trade accept path). The actor
+        /// is excluded from the state broadcast; its own response owns the authoritative hand-off.
+        /// With <paramref name="requireAllApplied"/> the batch aborts and retracts if any delta
+        /// cannot truly be applied here.</summary>
+        internal bool HandleCardDeltaBatch(int senderPlayerId, CardDeltaBatchMessage message,
+            bool requireAllApplied)
+        {
+            if (!_host || message?.Deltas == null)
+            {
                 return false;
             }
 
-            if (_host && message.IsAdd)
-            {
-                ConsumeGradingOwnership(connectionId, message.Card, message.Amount);
-            }
-            else if (_host && !relayAnyway)
-            {
-                if (!message.IsAdd)
-                {
-                    RecordGradingOwnership(connectionId, message.Card, message.Amount);
-                }
-            }
-
-            if (_host)
-            {
-                Broadcast(new CardDeltaMessage
-                {
-                    ActionId = message.ActionId,
-                    IsAdd = message.IsAdd,
-                    Amount = message.Amount,
-                    Card = SnapshotCard(message.Card),
-                });
-            }
-            return true;
+            return ApplyHostCardBatch(FindPeer(senderPlayerId), message, requireAllApplied);
         }
 
-        internal bool HandleCardDeltaBatch(int connectionId, ICardDeltaBatchSource message)
-            => HandleCardDeltaBatch(connectionId, message, requireAllApplied: false);
-
-        /// <summary>As <see cref="HandleCardDeltaBatch(int, ICardDeltaBatchSource)"/>, but when
-        /// <paramref name="requireAllApplied"/> is set the batch is one atomic movement: every
-        /// delta must truly apply on this host, and the first delta that cannot be applied -
-        /// refused, or merely relayed for content this host does not have - aborts the batch and
-        /// retracts whatever it already applied, so the host is never left with a partial
-        /// movement (for example, gaining the received card without giving up the offered one).</summary>
-        internal bool HandleCardDeltaBatch(int connectionId, ICardDeltaBatchSource message,
+        /// <summary>The shared host batch core. Deltas this host actually applied are retracted if
+        /// a strict batch fails; accepted deltas are published to every peer except the actor.</summary>
+        private bool ApplyHostCardBatch(ICoopPeer actor, ICardDeltaBatchSource message,
             bool requireAllApplied)
         {
-            if (_host && message == null)
+            if (!_host)
             {
                 return false;
             }
@@ -526,23 +606,13 @@ namespace CardShopCoop.Modules.World
             }
 
             var total = message.Deltas.Count;
-            if (_host && total > CardDeltaBatchMax)
+            if (total > CardDeltaBatchMax)
             {
                 throw new InvalidOperationException("Incoming card delta batch is too large.");
             }
 
-            if (!_host)
-            {
-                for (var i = 0; i < total; i++)
-                {
-                    ApplyOrHoldCardDelta(connectionId, message.Deltas[i].IsAdd,
-                        message.Deltas[i].Amount, message.Deltas[i].Card, out _,
-                        message.ActionId);
-                }
-                return true;
-            }
-
-            var needFiltered = _host && ConnectionCount > 1;
+            var playerId = actor?.Player?.Id ?? 0;
+            var needFiltered = PeerCount > 1;
             _batchRelayBuf.Clear();
             // Deltas this host actually applied (retracted if the batch fails) and deltas it could
             // only relay for content it lacks. Ownership is recorded from these AFTER the batch is
@@ -559,8 +629,7 @@ namespace CardShopCoop.Modules.World
                 bool relayAnyway;
                 try
                 {
-                    ok = ApplyOrHoldCardDelta(connectionId, delta.IsAdd, delta.Amount, delta.Card,
-                        out relayAnyway, message.ActionId);
+                    ok = ApplyCardDelta(delta.IsAdd, delta.Amount, delta.Card, out relayAnyway);
                 }
                 catch (Exception e)
                 {
@@ -576,14 +645,12 @@ namespace CardShopCoop.Modules.World
 
                 if (!ok && !relayAnyway)
                 {
-                    // REFUSED (invalid, overflow, or a remove this host cannot cover). Reporting
-                    // success here retired the sender's prediction while its refused deltas stayed
-                    // applied locally, diverging the two sides with no rollback. Undo what this
-                    // batch already applied and fail the whole batch, so the sender's rollback and
-                    // this host both return to the pre-batch state.
-                    CoopPlugin.Log.LogWarning("card delta batch from connection " + connectionId
-                        + " refused at delta " + (i + 1) + "/" + total
-                        + "; rolling the batch back.");
+                    // REFUSED (invalid, overflow, or a remove this host cannot cover). Undo what
+                    // this batch already applied and fail the whole batch, so the sender's
+                    // rollback and this host both return to the pre-batch state.
+                    CoopPlugin.Log.LogWarning("card delta batch from "
+                        + (actor?.Name ?? "player " + playerId) + " refused at delta "
+                        + (i + 1) + "/" + total + "; rolling the batch back.");
                     RetractCardDeltas(moved);
                     return false;
                 }
@@ -622,11 +689,11 @@ namespace CardShopCoop.Modules.World
             {
                 if (moved[i].IsAdd)
                 {
-                    ConsumeGradingOwnership(connectionId, moved[i].Card, moved[i].Amount);
+                    ConsumeGradingOwnership(playerId, moved[i].Card, moved[i].Amount);
                 }
                 else
                 {
-                    RecordGradingOwnership(connectionId, moved[i].Card, moved[i].Amount);
+                    RecordGradingOwnership(playerId, moved[i].Card, moved[i].Amount);
                 }
             }
 
@@ -634,19 +701,17 @@ namespace CardShopCoop.Modules.World
             {
                 if (relayed[i].IsAdd)
                 {
-                    ConsumeGradingOwnership(connectionId, relayed[i].Card, relayed[i].Amount);
+                    ConsumeGradingOwnership(playerId, relayed[i].Card, relayed[i].Amount);
                 }
             }
 
             if (applied == total && relayedOnly == 0 && total > 0)
             {
-                var authoritative = ToAuthoritative(message);
-                authoritative.ActionId = _host ? message.ActionId : Guid.Empty;
-                Broadcast(authoritative);
+                BroadcastExcept(actor, ToAuthoritative(message));
             }
             else if (_batchRelayBuf.Count > 0)
             {
-                RelayCardDeltaBatchToOthers(connectionId, _batchRelayBuf);
+                BroadcastExcept(actor, ToBatchMessage(_batchRelayBuf));
             }
             return applied > 0 || relayedOnly > 0;
         }
@@ -669,73 +734,263 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        internal bool HandleGradedRemove(int connectionId, IGradedRemoveSource message)
+        /// <summary>One client's graded-album removal: the host applies it to the shared album,
+        /// publishes the removal to every other peer, and answers the actor with the resulting
+        /// count so a lost race cannot leave a ghost certificate behind.</summary>
+        internal ActionOutcome HandleGradedRemove(CoopMessageContext context,
+            GradedRemoveRequestMessage message)
         {
-            if (_host && message == null)
+            if (!_host || !InGameLevel() || message?.Card == null)
             {
-                return false;
+                return ActionOutcome.Reject("the graded removal is not ready");
             }
 
-            var card = message.Card;
-
-            if (!InGameLevel())
-            {
-                _pendingCardDeltas.Add(new PendingCard
-                {
-                    ConnectionId = connectionId,
-                    ActionId = message.ActionId,
-                    IsAdd = false,
-                    IsGradedRemoval = true,
-                    Amount = 1,
-                    Card = SnapshotCard(card),
-                });
-                return true;
-            }
-
-            var relayAnyway = false;
-            var applied = _host
-                ? ApplyCardDelta(false, 1, card, out relayAnyway)
-                : ApplyTrustedCardDelta(false, 1, card);
+            var playerId = PlayerId(context);
+            var applied = ApplyCardDelta(false, 1, message.Card, out var relayAnyway);
             if (!applied && !relayAnyway)
             {
-                return false;
+                return ActionOutcome.Reject("the host refused the graded removal",
+                    BuildCardResult(message.Card));
             }
 
-            if (_host && !applied && GradedRemoveUncovered(card))
+            if (!applied && GradedRemoveUncovered(message.Card))
             {
-                // The card set is installed and the album has no matching certificate: the
-                // pick lost the race for that row, or the sender's replica drifted. The
-                // authoritative removal still goes out - with NO prediction id, so the sender
-                // applies it (a no-op on its already-removed row) before the generic rollback,
-                // which marks its guard and keeps the row gone, and a third peer at least drops
-                // a stale copy (the documented relay). Then the refusal despawns the hand card.
-                Broadcast(new GradedRemoveMessage
+                // The card set is installed and the album has no matching certificate: the pick
+                // lost the race for that row, or the sender's replica drifted. The authoritative
+                // removal still reaches every other peer, and the actor's response carries the
+                // host's count so its rollback cannot put the row back.
+                BroadcastExcept(context.Peer, new GradedRemoveMessage
                 {
-                    ActionId = Guid.Empty,
                     Card = SnapshotCard(message.Card),
                 });
-                return false;
+                return ActionOutcome.Reject("the host no longer has that card",
+                    BuildCardResult(message.Card));
             }
 
-            if (_host && !relayAnyway)
+            if (!relayAnyway)
             {
-                RecordGradingOwnership(connectionId, card, 1);
+                RecordGradingOwnership(playerId, message.Card, 1);
             }
 
-            if (ConnectionCount == 0)
+            BroadcastExcept(context.Peer, new GradedRemoveMessage
             {
-                return true;
-            }
+                Card = SnapshotCard(message.Card),
+            });
+            return ActionOutcome.Applied(BuildCardResult(message.Card));
+        }
 
-            if (_host)
+        private CardActionResult BuildCardResult(CardData card)
+            => BuildCardResult(new List<CardData> { card });
+
+        private CardActionResult BuildCardResult(List<CardData> cards)
+        {
+            var result = new CardActionResult();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (var i = 0; cards != null && i < cards.Count; i++)
             {
-                Broadcast(new GradedRemoveMessage
+                var card = cards[i];
+                if (card == null || !CardSetInstalledHere(card))
                 {
-                    ActionId = message.ActionId,
-                    Card = SnapshotCard(message.Card),
+                    continue;
+                }
+
+                var key = CardOwnershipKey(card);
+                if (key != null && !seen.Add(key))
+                {
+                    continue;
+                }
+
+                result.Cards.Add(new CardCountState
+                {
+                    Card = SnapshotCard(card),
+                    Amount = OwnedCardCount(card),
                 });
             }
-            return true;
+
+            return result;
+        }
+
+        private CardActionResult BuildCardBatchResult(List<CardDeltaEntry> deltas)
+        {
+            var cards = new List<CardData>(deltas?.Count ?? 0);
+            for (var i = 0; deltas != null && i < deltas.Count; i++)
+            {
+                cards.Add(deltas[i].Card);
+            }
+
+            return BuildCardResult(cards);
+        }
+
+        private static int OwnedCardCount(CardData card)
+            => card.cardGrade > 0
+                ? CountGradedCards(card)
+                : Math.Max(0, CPlayerData.GetCardAmount(card));
+
+        /// <summary>Applies the host's authoritative counts from an action response. This is the
+        /// one correction point for an accepted prediction that raced a remote change and for a
+        /// rejection whose local inverse no longer matches the host.</summary>
+        internal static void ApplyCardActionResult(ActionResponseMessage response)
+        {
+            if (response is not CardActionResult result || result.Cards == null)
+            {
+                return;
+            }
+
+            var current = Current;
+            if (current == null)
+            {
+                return;
+            }
+
+            current.ApplyAuthoritativeCardCounts(result.Cards);
+        }
+
+        private void ApplyAuthoritativeCardCounts(List<CardCountState> states)
+        {
+            var changed = false;
+            for (var i = 0; i < states.Count; i++)
+            {
+                var state = states[i];
+                if (state?.Card == null || !CardSetInstalledHere(state.Card))
+                {
+                    continue;
+                }
+
+                var target = Math.Max(0, state.Amount);
+                var have = OwnedCardCount(state.Card);
+                if (target == have)
+                {
+                    continue;
+                }
+
+                if (target > have)
+                {
+                    ApplyPredictedCardDelta(state.Card, target - have, true);
+                }
+                else
+                {
+                    ApplyPredictedCardDelta(state.Card, have - target, false);
+                }
+
+                changed = true;
+            }
+
+            if (changed)
+            {
+                NotifyCardsChanged();
+            }
+        }
+
+        /// <summary>Local state a card action owns until its response settles it. Never serialized;
+        /// the host's copy of the request has none of it.</summary>
+        internal sealed class CardActionPrediction
+        {
+            internal BinderTakeBinding Binding;
+            internal GradedRemovalGuard Guard;
+        }
+
+        internal static void UndoCardDelta(CardDeltaRequestMessage message)
+        {
+            if (message?.Prediction == null)
+            {
+                return;
+            }
+
+            ApplyPredictedCardDelta(message.Card, message.Amount, !message.IsAdd);
+            Current?.NotifyCardsChanged();
+        }
+
+        internal static void MergeCardDelta(CardDeltaRequestMessage message,
+            ActionResponseMessage response)
+        {
+            if (message == null)
+            {
+                return;
+            }
+
+            try
+            {
+                ApplyCardActionResult(response);
+                if (response?.Rejected == true && message.Prediction != null && !message.IsAdd)
+                {
+                    DespawnRejectedBinderTake(message.Prediction.Binding, message.Card);
+                    GradingApi.OnCardRemovalRefused(message.Card, message.Amount);
+                }
+            }
+            finally
+            {
+                OnActionSettled(message.ActionId);
+            }
+        }
+
+        internal static void UndoCardDeltaBatch(CardDeltaBatchRequestMessage message)
+        {
+            if (message?.Predicted != true || message.Deltas == null)
+            {
+                return;
+            }
+
+            ApplyPredictedCardBatch(message.Deltas, reverse: true);
+            Current?.NotifyCardsChanged();
+        }
+
+        internal static void MergeCardDeltaBatch(CardDeltaBatchRequestMessage message,
+            ActionResponseMessage response)
+        {
+            if (message == null)
+            {
+                return;
+            }
+
+            try
+            {
+                ApplyCardActionResult(response);
+            }
+            finally
+            {
+                OnActionSettled(message.ActionId);
+            }
+        }
+
+        internal static void UndoGradedRemove(GradedRemoveRequestMessage message)
+        {
+            if (message?.Prediction == null)
+            {
+                return;
+            }
+
+            // A competing accepted removal of this same certificate means the shared row is
+            // already gone; putting it back would mint a ghost certificate.
+            if (message.Prediction.Guard?.Superseded == true)
+            {
+                return;
+            }
+
+            ApplyPredictedCardDelta(message.Card, 1, isAdd: true);
+            Current?.NotifyCardsChanged();
+        }
+
+        internal static void MergeGradedRemove(GradedRemoveRequestMessage message,
+            ActionResponseMessage response)
+        {
+            if (message == null)
+            {
+                return;
+            }
+
+            try
+            {
+                ApplyCardActionResult(response);
+                if (response?.Rejected == true && message.Prediction != null)
+                {
+                    DespawnRejectedBinderTake(message.Prediction.Binding, message.Card);
+                    GradingApi.OnCardRemovalRefused(message.Card, 1);
+                }
+            }
+            finally
+            {
+                OnActionSettled(message.ActionId);
+            }
         }
 
         internal void Reset()
@@ -773,11 +1028,11 @@ namespace CardShopCoop.Modules.World
             GradingWorldBridge.Detach(_gradingBridge);
         }
 
-        internal void ForgetGradingOwnership(int connectionId)
+        internal void ForgetGradingOwnership(int playerId)
         {
-            if (connectionId > 0)
+            if (playerId > 0)
             {
-                RestoreGradingOwnership(connectionId);
+                RestoreGradingOwnership(playerId);
             }
         }
 
@@ -821,21 +1076,21 @@ namespace CardShopCoop.Modules.World
             return ApplyRestoredCards(restored);
         }
 
-        private bool RestoreGradingOwnership(int connectionId)
+        private bool RestoreGradingOwnership(int playerId)
         {
-            if (!_gradingOwnership.ContainsKey(connectionId))
+            if (!_gradingOwnership.ContainsKey(playerId))
             {
                 return true;
             }
 
             if (!InGameLevel() || Inv() == null
-                || !_gradingOwnershipCards.TryGetValue(connectionId, out var cards))
+                || !_gradingOwnershipCards.TryGetValue(playerId, out var cards))
             {
                 return false;
             }
 
             var restored = new List<PendingCard>();
-            foreach (var claim in _gradingOwnership[connectionId])
+            foreach (var claim in _gradingOwnership[playerId])
             {
                 if (!cards.TryGetValue(claim.Key, out var card) || card == null
                     || claim.Value <= 0 || claim.Value > CardDeltaAmountMax)
@@ -856,10 +1111,10 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            _gradingOwnership.Remove(connectionId);
-            _gradingOwnershipCards.Remove(connectionId);
+            _gradingOwnership.Remove(playerId);
+            _gradingOwnershipCards.Remove(playerId);
             CoopPlugin.Log.LogInfo("restored " + restored.Count
-                + " grading card claim(s) before clearing connection " + connectionId);
+                + " grading card claim(s) before clearing player " + playerId);
             return true;
         }
 
@@ -983,17 +1238,17 @@ namespace CardShopCoop.Modules.World
         /// _gradingOwnership; cards still in the host's collected/graded inventory are checked
         /// directly. The caller gets one transaction which either commits those exact cards or
         /// restores every host mutation on dispose.</summary>
-        internal bool TryReserveGradingCards(int connectionId, IList<CardData> cards,
+        internal bool TryReserveGradingCards(int playerId, IList<CardData> cards,
             out IGradingCardReservation reservation, out string reason)
         {
             reservation = null;
             reason = null;
-            if (!_host || connectionId <= 0 || cards == null || cards.Count == 0)
+            if (!_host || playerId <= 0 || cards == null || cards.Count == 0)
             {
                 reason = "the host card owner is not ready";
                 return false;
             }
-            var transferred = _gradingOwnership.TryGetValue(connectionId, out var owned)
+            var transferred = _gradingOwnership.TryGetValue(playerId, out var owned)
                 ? new Dictionary<string, int>(owned, StringComparer.Ordinal) : null;
             var planned = new List<ReservedGradingCard>(cards.Count);
             var actualUngraded = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -1055,8 +1310,8 @@ namespace CardShopCoop.Modules.World
             catch (Exception error)
             {
                 reason = "host card ownership could not be checked: " + error.Message;
-                CoopPlugin.Log.LogError("grading card ownership check failed for connection "
-                    + connectionId + ": " + error);
+                CoopPlugin.Log.LogError("grading card ownership check failed for player "
+                    + playerId + ": " + error);
                 return false;
             }
 
@@ -1123,11 +1378,11 @@ namespace CardShopCoop.Modules.World
                     }
                 }
                 NotifyCardsChanged();
-                reservation = new GradingCardReservation(this, connectionId, planned,
-                    _gradingOwnership.TryGetValue(connectionId, out var claimCounts)
+                reservation = new GradingCardReservation(this, playerId, planned,
+                    _gradingOwnership.TryGetValue(playerId, out var claimCounts)
                         ? new Dictionary<string, int>(claimCounts, StringComparer.Ordinal)
                         : null,
-                    _gradingOwnershipCards.TryGetValue(connectionId, out var claimCards)
+                    _gradingOwnershipCards.TryGetValue(playerId, out var claimCards)
                         ? CloneClaimCards(claimCards) : null);
                 return true;
             }
@@ -1135,8 +1390,8 @@ namespace CardShopCoop.Modules.World
             {
                 RollbackGradingCards(applied);
                 reason = "host card reservation failed: " + error.Message;
-                CoopPlugin.Log.LogError("grading card reservation failed for connection "
-                    + connectionId + ": " + error);
+                CoopPlugin.Log.LogError("grading card reservation failed for player "
+                    + playerId + ": " + error);
                 return false;
             }
         }
@@ -1250,7 +1505,7 @@ namespace CardShopCoop.Modules.World
         private sealed class GradingCardReservation : IGradingCardReservation
         {
             private readonly WorldCardInteraction _owner;
-            private readonly int _connectionId;
+            private readonly int _playerId;
             private readonly List<ReservedGradingCard> _cards;
             private readonly Dictionary<string, int> _claimCountsBefore;
             private readonly Dictionary<string, CardData> _claimCardsBefore;
@@ -1258,12 +1513,12 @@ namespace CardShopCoop.Modules.World
             private bool _rolledBack;
             private bool _disposed;
 
-            internal GradingCardReservation(WorldCardInteraction owner, int connectionId,
+            internal GradingCardReservation(WorldCardInteraction owner, int playerId,
                 List<ReservedGradingCard> cards, Dictionary<string, int> claimCountsBefore,
                 Dictionary<string, CardData> claimCardsBefore)
             {
                 _owner = owner;
-                _connectionId = connectionId;
+                _playerId = playerId;
                 _cards = cards;
                 _claimCountsBefore = claimCountsBefore;
                 _claimCardsBefore = claimCardsBefore;
@@ -1286,7 +1541,7 @@ namespace CardShopCoop.Modules.World
 
                     if (moved == null)
                     {
-                        if (!_owner._gradingOwnership.TryGetValue(_connectionId, out var current))
+                        if (!_owner._gradingOwnership.TryGetValue(_playerId, out var current))
                         {
                             throw new InvalidOperationException("grading ownership transfer disappeared before commit");
                         }
@@ -1312,7 +1567,7 @@ namespace CardShopCoop.Modules.World
 
                 if (moved != null)
                 {
-                    var current = _owner._gradingOwnership[_connectionId];
+                    var current = _owner._gradingOwnership[_playerId];
                     current.Clear();
                     foreach (var pair in moved)
                     {
@@ -1337,21 +1592,21 @@ namespace CardShopCoop.Modules.World
                     {
                         if (_claimCountsBefore == null || _claimCountsBefore.Count == 0)
                         {
-                            _owner._gradingOwnership.Remove(_connectionId);
+                            _owner._gradingOwnership.Remove(_playerId);
                         }
                         else
                         {
-                            _owner._gradingOwnership[_connectionId] =
+                            _owner._gradingOwnership[_playerId] =
                                 new Dictionary<string, int>(_claimCountsBefore, StringComparer.Ordinal);
                         }
 
                         if (_claimCardsBefore == null || _claimCardsBefore.Count == 0)
                         {
-                            _owner._gradingOwnershipCards.Remove(_connectionId);
+                            _owner._gradingOwnershipCards.Remove(_playerId);
                         }
                         else
                         {
-                            _owner._gradingOwnershipCards[_connectionId] = CloneClaimCards(_claimCardsBefore);
+                            _owner._gradingOwnershipCards[_playerId] = CloneClaimCards(_claimCardsBefore);
                         }
                     }
                     catch (Exception error)
@@ -1412,19 +1667,19 @@ namespace CardShopCoop.Modules.World
             return result;
         }
 
-        private Dictionary<string, int> GetOrCreateOwnership(int connectionId)
+        private Dictionary<string, int> GetOrCreateOwnership(int playerId)
         {
-            if (!_gradingOwnership.TryGetValue(connectionId, out var result))
+            if (!_gradingOwnership.TryGetValue(playerId, out var result))
             {
                 result = new Dictionary<string, int>(StringComparer.Ordinal);
-                _gradingOwnership[connectionId] = result;
+                _gradingOwnership[playerId] = result;
             }
             return result;
         }
 
-        private void RecordGradingOwnership(int connectionId, CardData card, int amount)
+        private void RecordGradingOwnership(int playerId, CardData card, int amount)
         {
-            if (!_host || connectionId <= 0 || card == null || amount <= 0)
+            if (!_host || playerId <= 0 || card == null || amount <= 0)
             {
                 return;
             }
@@ -1435,21 +1690,21 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var owned = GetOrCreateOwnership(connectionId);
+            var owned = GetOrCreateOwnership(playerId);
             owned.TryGetValue(key, out var count);
             owned[key] = Math.Min(1024, count > 1024 - amount ? 1024 : count + amount);
-            if (!_gradingOwnershipCards.TryGetValue(connectionId, out var cards))
+            if (!_gradingOwnershipCards.TryGetValue(playerId, out var cards))
             {
                 cards = new Dictionary<string, CardData>(StringComparer.Ordinal);
-                _gradingOwnershipCards[connectionId] = cards;
+                _gradingOwnershipCards[playerId] = cards;
             }
             cards[key] = SnapshotCard(card);
         }
 
-        private bool ConsumeGradingOwnership(int connectionId, CardData card, int amount)
+        private bool ConsumeGradingOwnership(int playerId, CardData card, int amount)
         {
-            if (!_host || connectionId <= 0 || card == null || amount <= 0
-                || !_gradingOwnership.TryGetValue(connectionId, out var owned))
+            if (!_host || playerId <= 0 || card == null || amount <= 0
+                || !_gradingOwnership.TryGetValue(playerId, out var owned))
             {
                 return false;
             }
@@ -1468,15 +1723,15 @@ namespace CardShopCoop.Modules.World
             else
             {
                 owned.Remove(key);
-                if (_gradingOwnershipCards.TryGetValue(connectionId, out var cards))
+                if (_gradingOwnershipCards.TryGetValue(playerId, out var cards))
                 {
                     cards.Remove(key);
                 }
             }
             if (owned.Count == 0)
             {
-                _gradingOwnership.Remove(connectionId);
-                _gradingOwnershipCards.Remove(connectionId);
+                _gradingOwnership.Remove(playerId);
+                _gradingOwnershipCards.Remove(playerId);
             }
             return true;
         }
@@ -1562,10 +1817,7 @@ namespace CardShopCoop.Modules.World
         // card mirrors that arrived during a scene load, flushed once in-game
         private struct PendingCard
         {
-            public int ConnectionId;
-            public Guid ActionId;
             public bool IsAdd;
-            public bool IsGradedRemoval;
             public int Amount;
             public CardData Card;
         }
@@ -1749,7 +2001,17 @@ namespace CardShopCoop.Modules.World
                         GradingApi.Remember(card);
                     }
 
-                    CPlayerData.AddCard(card, amount);
+                    if (card.cardGrade > 0)
+                    {
+                        for (var i = 0; i < amount; i++)
+                        {
+                            CPlayerData.AddCard(SnapshotCard(card), 1);
+                        }
+                    }
+                    else
+                    {
+                        CPlayerData.AddCard(card, amount);
+                    }
                 }
                 else if (card.cardGrade > 0)
                 {
@@ -1793,52 +2055,35 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        /// <summary>Shared by the CardDelta and CardDeltaBatch handlers: hold the delta if a
-        /// scene load is in flight (applying mid-load crashes into uninitialized card data;
-        /// nothing is lost, FlushPendingCardWork replays it), otherwise apply it. Returns true
-        /// only when it was actually applied - i.e. when it may be relayed onward - and reports
-        /// through <paramref name="relayAnyway"/> the "this PC lacks the content, but the delta
-        /// is fine" refusal that must still be forwarded (see ApplyCardDelta).</summary>
-        internal bool ApplyOrHoldCardDelta(int connectionId, bool isAdd, int amount,
-            CardData card, out bool relayAnyway, Guid actionId = default)
+        /// <summary>Applies one authoritative card delta on this client. A delta that arrives
+        /// during a scene load is held instead of applied mid-load (applying then crashes into
+        /// uninitialized card data); nothing is lost, <see cref="FlushPendingCardWork"/> applies it
+        /// once the world is ready.</summary>
+        private bool ApplyOrHoldCardDelta(bool isAdd, int amount, CardData card, out bool relayAnyway)
         {
             relayAnyway = false;
-            if (_host && !TryValidateCardDelta(card, amount, out var invalidReason))
-            {
-                CoopPlugin.Log.LogWarning("card delta from connection " + connectionId
-                    + " refused: " + invalidReason);
-                return false;
-            }
             if (!InGameLevel())
             {
-                // HELD, not relayAnyway. Note this is NOT "it will relay later": the replay in
-                // FlushPendingCardWork applies without relaying, so a delta held across a scene
-                // load never reaches the other guests. That is pre-existing 1.0.36 behavior and
-                // is deliberately left alone here - the relay-anyway work is about content this
-                // PC lacks, not about the load window.
                 _pendingCardDeltas.Add(new PendingCard
                 {
-                    ConnectionId = connectionId,
-                    ActionId = actionId,
                     IsAdd = isAdd,
                     Amount = amount,
                     Card = SnapshotCard(card),
                 });
                 return false;
             }
-            return _host
-                ? ApplyCardDelta(isAdd, amount, card, out relayAnyway)
-                : ApplyTrustedCardDelta(isAdd, amount, card);
+
+            return ApplyTrustedCardDelta(isAdd, amount, card);
         }
 
         /// <summary>True when a graded removal request could not be applied although this host HAS
         /// the card set installed: the album simply has no matching certificate, i.e. another
         /// player's accepted removal consumed the row while the request was in flight (or the
-        /// sender's replica is stale). The request must be refused so the sender's prediction
-        /// rolls back and its held card is despawned - but the authoritative removal is still
-        /// published to every peer (empty prediction id) before that rollback, preserving the
-        /// relay that keeps a third player's stale certificate from ghosting. A host that cannot
-        /// represent the card keeps the plain relay-anyway accept path.</summary>
+        /// sender's replica is stale). The request is refused so the sender's prediction rolls
+        /// back and its held card is despawned; the authoritative removal still reaches every
+        /// other peer, and the actor's response carries the host's count so its rollback cannot
+        /// resurrect a ghost certificate. A host that cannot represent the card keeps the plain
+        /// relay-anyway accept path.</summary>
         private static bool GradedRemoveUncovered(CardData card)
             => card != null && card.cardGrade > 0 && CardSetInstalledHere(card);
 
@@ -2479,156 +2724,15 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            var count = _pendingCardDeltas.Count;
+            for (var i = 0; i < count; i++)
             {
-                var relayed = _host ? new List<PendingCard>(_pendingCardDeltas.Count) : null;
-                var refused = _host ? new List<PendingCard>() : null;
-                foreach (var p in _pendingCardDeltas)
-                {
-                    var relayAnyway = false;
-                    var applied = _host
-                        ? ApplyCardDelta(p.IsAdd, p.Amount, p.Card, out relayAnyway)
-                        : ApplyTrustedCardDelta(p.IsAdd, p.Amount, p.Card);
-                    if (_host && !applied && relayAnyway && GradedRemoveUncovered(p.Card))
-                    {
-                        // Held across the scene load; by the time it could run, the certificate
-                        // was consumed. Sends are deferred past the clear below so a send failure
-                        // cannot leave this batch half-applied for the next tick.
-                        refused.Add(p);
-                        continue;
-                    }
-
-                    if (_host && (applied || relayAnyway) && p.IsAdd)
-                    {
-                        ConsumeGradingOwnership(p.ConnectionId, p.Card, p.Amount);
-                    }
-                    else if (_host && applied && !relayAnyway)
-                    {
-                        RecordGradingOwnership(p.ConnectionId, p.Card, p.Amount);
-                    }
-
-                    if (_host && (applied || relayAnyway))
-                    {
-                        relayed.Add(p);
-                    }
-                }
-
-                if (_pendingCardDeltas.Count > 0)
-                {
-                    CoopPlugin.Log.LogInfo($"applied {_pendingCardDeltas.Count} card change(s) held during loading");
-                }
-
-                _pendingCardDeltas.Clear();
-
-                // The authoritative removal still goes out (with NO prediction id) before the
-                // rollback, so a stale third peer drops the copy and the sender reconciles to
-                // authority - then the refusal rolls back its prediction and despawns the card.
-                if (refused != null)
-                {
-                    for (var i = 0; i < refused.Count; i++)
-                    {
-                        var p = refused[i];
-                        CoopPlugin.Log.LogWarning("graded removal held across loading has no album "
-                            + "row left; refused for connection " + p.ConnectionId + ".");
-                        if (p.IsGradedRemoval)
-                        {
-                            Broadcast(new GradedRemoveMessage
-                            {
-                                ActionId = Guid.Empty,
-                                Card = SnapshotCard(p.Card),
-                            });
-                        }
-                        else
-                        {
-                            Broadcast(new CardDeltaMessage
-                            {
-                                ActionId = Guid.Empty,
-                                IsAdd = false,
-                                Amount = p.Amount,
-                                Card = SnapshotCard(p.Card),
-                            });
-                        }
-
-                        ActionHost.Reject(_context, p.ConnectionId, p.ActionId);
-                    }
-                }
-
-                // Deltas received while the host was loading are still authoritative events. They
-                // were held before relay, so replay them in their original order now rather than
-                // silently leaving the other guests with a stale card ledger.
-                if (relayed != null)
-                {
-                    for (var i = 0; i < relayed.Count; i++)
-                    {
-                        var p = relayed[i];
-                        if (p.IsGradedRemoval)
-                        {
-                            var message = new GradedRemoveMessage
-                            {
-                                ActionId = p.ActionId,
-                                Card = SnapshotCard(p.Card),
-                            };
-                            SendAcceptedPendingCard(p, message);
-                        }
-                        else
-                        {
-                            var message = new CardDeltaMessage
-                            {
-                                ActionId = p.ActionId,
-                                IsAdd = p.IsAdd,
-                                Amount = p.Amount,
-                                Card = SnapshotCard(p.Card),
-                            };
-                            SendAcceptedPendingCard(p, message);
-                        }
-                    }
-                }
-            }
-        }
-
-        private void SendAcceptedPendingCard(PendingCard pending, WorldStateMessage message)
-        {
-            if (pending.ActionId != Guid.Empty && pending.ConnectionId > 0)
-            {
-                Send(pending.ConnectionId, message);
+                var pending = _pendingCardDeltas[i];
+                ApplyTrustedCardDelta(pending.IsAdd, pending.Amount, pending.Card);
             }
 
-            RelayToOthers(pending.ConnectionId, message);
-        }
-
-        /// <summary>Host-side raw fan-out: forward a message a guest sent us on to the OTHER
-        /// guests, byte-for-byte. The collection is one shared inventory, so a card a 3rd+ player
-        /// gains/loses must reach every peer, not just the host. We re-wrap the ORIGINAL payload
-        /// bytes (not a re-serialized CardData) so an encoded graded grade - the >10 company/cert
-        /// packing - survives verbatim; re-serializing would risk lossy round-trips. Same shape as
-        /// the CardShelfRequest relay, generalized. No-op unless we're the host with >1 peer.</summary>
-        /// <summary>Host: relay only the deltas of a CardDeltaBatch that THIS side accepted.
-        /// Used when part of the batch was refused here (corrupt grade / uninstalled card set /
-        /// would-go-negative): the whole-batch case relays the ORIGINAL bytes, but a delta we
-        /// refused must never be propagated onward - exactly the guarantee the single-delta
-        /// case has always had.</summary>
-        /// <summary>Host-side DTO fan-out: forward a decoded DTO a guest sent us to the OTHER
-        /// guests. The DTO carries the exact CardData (including the encoded graded grade), so
-        /// re-serializing it reproduces the original wire bytes.</summary>
-        internal void RelayToOthers(int senderConn, INetMessage message)
-        {
-            if (!_host || ConnectionCount <= 1)
-            {
-                return;
-            }
-
-            if (RelayOverride != null)
-            {
-                RelayOverride(senderConn, message);
-                return;
-            }
-
-            foreach (var cid in ConnectionIds())
-            {
-                if (cid != senderConn)
-                {
-                    Send(cid, message);
-                }
-            }
+            CoopPlugin.Log.LogInfo("applied " + count + " card change(s) held during loading");
+            _pendingCardDeltas.Clear();
         }
 
         private static CardDeltaBatchMessage ToAuthoritative(ICardDeltaBatchSource message)
@@ -2653,37 +2757,20 @@ namespace CardShopCoop.Modules.World
             return result;
         }
 
-        private void RelayCardDeltaBatchToOthers(int senderConn, List<PendingCard> deltas)
+        private static CardDeltaBatchMessage ToBatchMessage(List<PendingCard> deltas)
         {
-            if (!_host || ConnectionCount <= 1 || deltas.Count == 0)
+            var result = new CardDeltaBatchMessage();
+            for (var i = 0; deltas != null && i < deltas.Count; i++)
             {
-                return;
-            }
-
-            var relay = new CardDeltaBatchMessage();
-            for (var i = 0; i < deltas.Count; i++)
-            {
-                relay.Deltas.Add(new CardDeltaEntry
+                result.Deltas.Add(new CardDeltaEntry
                 {
                     IsAdd = deltas[i].IsAdd,
                     Amount = deltas[i].Amount,
-                    Card = deltas[i].Card
+                    Card = deltas[i].Card,
                 });
             }
 
-            if (RelayOverride != null)
-            {
-                RelayOverride(senderConn, relay);
-                return;
-            }
-
-            foreach (var cid in ConnectionIds())
-            {
-                if (cid != senderConn)
-                {
-                    Send(cid, relay);
-                }
-            }
+            return result;
         }
 
         /// <summary>End of frame: flush card-delta diagnostics and mirror everything applied this

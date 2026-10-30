@@ -1,8 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using UnityEngine;
+using CardShopCoop.Api;
 using CardShopCoop.Net.Connection;
+using UnityEngine;
 
 namespace CardShopCoop.Modules.Presence
 {
@@ -44,17 +45,17 @@ namespace CardShopCoop.Modules.Presence
         }
     }
 
-    public interface IPeerPresence
+    internal interface IPeerPresence
     {
         bool TryGet(int connectionId, out PeerPresence presence);
-        void RecordAuthenticatedPosition(PeerConnection connection, Vector3 position);
-        void RecordAuthenticatedHold(PeerConnection connection, byte hold, IReadOnlyList<int> holdTypes);
+        void RecordAuthenticatedPosition(ICoopPeer peer, Vector3 position);
+        void RecordAuthenticatedHold(ICoopPeer peer, byte hold, IReadOnlyList<int> holdTypes);
         void Clear(int connectionId);
         void ClearAll();
     }
 
     /// <summary>Host-owned, receipt-time presence. It deliberately accepts no relay identity.</summary>
-    public sealed class PeerPresenceProvider : IPeerPresence
+    internal sealed class PeerPresenceProvider : IPeerPresence
     {
         private sealed class Entry
         {
@@ -90,39 +91,45 @@ namespace CardShopCoop.Modules.Presence
                 return true;
             }
         }
-        public void RecordAuthenticatedPosition(PeerConnection connection, Vector3 position)
+        public void RecordAuthenticatedPosition(ICoopPeer peer, Vector3 position)
         {
-            if (connection == null || connection.State != ConnectionState.FullyJoined || !Finite(position))
+            if (peer == null || peer.State != ConnectionState.FullyJoined || !Finite(position))
             {
                 return;
             }
 
+            var id = peer.Player.Id;
             lock (_gate)
             {
-                if (_entries.TryGetValue(connection.Id, out var entry))
+                if (_entries.TryGetValue(id, out var entry))
                 {
                     entry.Position = position;
                     entry.Receipt = Stopwatch.GetTimestamp();
                     return;
                 }
 
-                _entries[connection.Id] = new Entry { Position = position, Receipt = Stopwatch.GetTimestamp() };
+                _entries[id] = new Entry
+                {
+                    Position = position,
+                    Receipt = Stopwatch.GetTimestamp(),
+                };
             }
         }
 
         /// <summary>Records the advertised hold slot and its type IDs. The hold payload rides its
         /// own reliable message, so this preserves the last position and refreshes the receipt.</summary>
-        public void RecordAuthenticatedHold(PeerConnection connection, byte hold, IReadOnlyList<int> holdTypes)
+        public void RecordAuthenticatedHold(ICoopPeer peer, byte hold, IReadOnlyList<int> holdTypes)
         {
-            if (connection == null || connection.State != ConnectionState.FullyJoined)
+            if (peer == null || peer.State != ConnectionState.FullyJoined)
             {
                 return;
             }
 
+            var id = peer.Player.Id;
             var copy = CopyHoldTypes(holdTypes);
             lock (_gate)
             {
-                if (_entries.TryGetValue(connection.Id, out var entry))
+                if (_entries.TryGetValue(id, out var entry))
                 {
                     entry.Hold = hold;
                     entry.HoldTypes = copy;
@@ -130,7 +137,12 @@ namespace CardShopCoop.Modules.Presence
                     return;
                 }
 
-                _entries[connection.Id] = new Entry { Hold = hold, HoldTypes = copy, Receipt = Stopwatch.GetTimestamp() };
+                _entries[id] = new Entry
+                {
+                    Hold = hold,
+                    HoldTypes = copy,
+                    Receipt = Stopwatch.GetTimestamp(),
+                };
             }
         }
         public void Clear(int connectionId)

@@ -32,6 +32,18 @@ namespace CardShopCoop.Modules.Decoration
         public List<int> Inventory = new();
     }
 
+    /// <summary>A decoration intent's local prediction. The message carries it, so the undo and
+    /// merge hooks know which game change this action made and which local artifact it owns.</summary>
+    internal interface IDecorationPrediction
+    {
+        /// <summary>Reverses the optimistic local change.</summary>
+        void Undo();
+
+        /// <summary>Applies the host's authoritative response state and settles the local
+        /// artifact.</summary>
+        void Merge(ActionResponseMessage response);
+    }
+
     /// <summary>
     /// Client intent. Prices, inventory and placement validity are never trusted from this
     /// message. <see cref="Entity"/> is the live decoration being moved or removed. A new
@@ -54,31 +66,45 @@ namespace CardShopCoop.Modules.Decoration
         public int WallIndex;
         public InteractableObject Entity;
 
-        /// <summary>The live prediction/reversal for an intent is recorded by the client's
-        /// action-ledger closures: they capture the piece's pre-action snapshot and which game
-        /// path produced it. Nothing is replayed from this DTO itself.</summary>
-        public override void OnApply()
-        {
-        }
+        /// <summary>The local undo/settle for the game change this intent already performed.
+        /// Local-only; never serialized.</summary>
+        [NonSerialized]
+        internal IDecorationPrediction Prediction;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            Prediction?.Undo();
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            var prediction = Prediction;
+            Prediction = null;
+            prediction?.Merge(response);
         }
     }
 
     /// <summary>Authoritative decoration state delta. Object creation, movement and removal are
     /// identity lifecycle events; this message carries only inventory/equip state and is never a
-    /// command. <see cref="ActionId"/> retires the intent prediction this delta answers.</summary>
+    /// command.</summary>
     [NetworkMessage]
     public sealed class DecorationDeltaMessage : INetMessage
     {
-        public Guid ActionId;
         public byte Action;
         public int Category;
         public int Index;
         public EDecoObject DecorationType;
         public bool LotB;
         public int InventoryCount;
+    }
+
+    /// <summary>The acting client's answer: the post-action inventory/equip delta on accept, or
+    /// the host's authoritative snapshot on reject.</summary>
+    [NetworkMessage]
+    public sealed class DecorationIntentResponse : ActionResponseMessage
+    {
+        public DecorationDeltaMessage Delta;
+        public DecorationStateMessage State;
     }
 
     /// <summary>Local pose carrier between the module and the identity adapter. It is never sent

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -14,7 +15,8 @@ namespace CardShopCoop.Modules.World
 
         internal void InstallPlacementHold()
         {
-            _placementHold = new PlacementHoldInteraction(true, RuntimeContext.Broadcast, RuntimeContext.Send);
+            _placementHold = new PlacementHoldInteraction(true, Context.Broadcast,
+                (peer, message) => peer.Send(message));
             Harmony.CreateClassProcessor(typeof(PlacementHoldStartPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
             Harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();
@@ -32,61 +34,58 @@ namespace CardShopCoop.Modules.World
         internal void TickPlacementHold() => _placementHold?.Tick();
 
         [MessageHandler]
-        private void HandlePlacementHoldBegin(MessageContext context,
+        private void HandlePlacementHoldBegin(CoopMessageContext context,
             PlacementHoldBeginRequestMessage message)
         {
-            if (message == null || _placementHold == null || !RuntimeContext.InGame()
-                || !IsJoinPhaseSender(context))
+            if (message == null || _placementHold == null || !IsPlacementPeerMessage(context))
             {
                 return;
             }
 
             if (message.Entity == null)
             {
-                CoopPlugin.Log.LogWarning("[placement-hold] dropped begin request from connection="
-                    + context.ConnectionId + " with no live entity.");
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped begin request from peer="
+                    + context.Peer.Name + " with no live entity.");
                 return;
             }
 
-            if (_placementHold.HostGrant(message.Entity, context.ConnectionId, message,
-                out var granted))
+            if (_placementHold.HostGrant(message.Entity, context.Peer, message, out var granted))
             {
                 // The host is an observer of a client's hold too, so render it here as well as
                 // broadcasting to the other peers.
                 _placementHold.ApplyBegin(granted);
-                RuntimeContext.Broadcast(granted);
+                Context.Broadcast(granted);
             }
             else
             {
                 CoopPlugin.Log.LogInfo("[placement-hold] begin request refused for entity="
-                    + PlacementInterop.Describe(message.Entity) + " connection="
-                    + context.ConnectionId + ".");
+                    + PlacementInterop.Describe(message.Entity) + " peer="
+                    + context.Peer.Name + ".");
             }
         }
 
         [MessageHandler]
-        private void HandlePlacementHoldEnd(MessageContext context,
+        private void HandlePlacementHoldEnd(CoopMessageContext context,
             PlacementHoldEndRequestMessage message)
         {
-            if (message == null || _placementHold == null || !RuntimeContext.InGame()
-                || !IsJoinPhaseSender(context))
+            if (message == null || _placementHold == null || !IsPlacementPeerMessage(context))
             {
                 return;
             }
 
             if (message.Entity == null)
             {
-                CoopPlugin.Log.LogWarning("[placement-hold] dropped end request from connection="
-                    + context.ConnectionId + " with no live entity.");
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped end request from peer="
+                    + context.Peer.Name + " with no live entity.");
                 return;
             }
 
-            if (_placementHold.HostRelease(message.Entity, context.ConnectionId))
+            if (_placementHold.HostRelease(message.Entity, context.Peer))
             {
                 // The host rendered this client's hold when it granted it, so it must stop that
                 // local render as well as telling the peers.
                 _placementHold.ApplyEnd(message.Entity);
-                RuntimeContext.Broadcast(new PlacementHoldEndMessage { Entity = message.Entity });
+                Context.Broadcast(new PlacementHoldEndMessage { Entity = message.Entity });
             }
         }
 
@@ -95,32 +94,31 @@ namespace CardShopCoop.Modules.World
         {
             if (connection != null)
             {
-                _placementHold?.ReleaseMover(connection.Id, _releasedHolds);
+                _placementHold?.ReleaseMover(PeerHandle.ForConnection(connection), _releasedHolds);
             }
         }
 
         [MessageHandler]
-        private void HandlePlacementHoldRotation(MessageContext context,
+        private void HandlePlacementHoldRotation(CoopMessageContext context,
             PlacementHoldRotationRequestMessage message)
         {
-            if (message == null || _placementHold == null || !RuntimeContext.InGame()
-                || !IsJoinPhaseSender(context))
+            if (message == null || _placementHold == null || !IsPlacementPeerMessage(context))
             {
                 return;
             }
 
             if (message.Entity == null)
             {
-                CoopPlugin.Log.LogWarning("[placement-hold] dropped rotation request from "
-                    + "connection=" + context.ConnectionId + " with no live entity.");
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped rotation request from peer="
+                    + context.Peer.Name + " with no live entity.");
                 return;
             }
 
-            if (!_placementHold.IsHeldBy(message.Entity, context.ConnectionId))
+            if (!_placementHold.IsHeldBy(message.Entity, context.Peer))
             {
                 CoopPlugin.Log.LogInfo("[placement-hold] ignored rotation for entity="
-                    + PlacementInterop.Describe(message.Entity) + " not held by connection="
-                    + context.ConnectionId + ".");
+                    + PlacementInterop.Describe(message.Entity) + " not held by peer="
+                    + context.Peer.Name + ".");
                 return;
             }
 
@@ -132,31 +130,30 @@ namespace CardShopCoop.Modules.World
                 Rotation = message.Rotation,
             };
             _placementHold.ApplyRotation(rotation);
-            RuntimeContext.Broadcast(rotation);
+            Context.Broadcast(rotation);
         }
 
         [MessageHandler]
-        private void HandlePlacementHoldState(MessageContext context,
+        private void HandlePlacementHoldState(CoopMessageContext context,
             PlacementHoldStateRequestMessage message)
         {
-            if (message == null || _placementHold == null || !RuntimeContext.InGame()
-                || !IsJoinPhaseSender(context))
+            if (message == null || _placementHold == null || !IsPlacementPeerMessage(context))
             {
                 return;
             }
 
             if (message.Entity == null)
             {
-                CoopPlugin.Log.LogWarning("[placement-hold] dropped state request from "
-                    + "connection=" + context.ConnectionId + " with no live entity.");
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped state request from peer="
+                    + context.Peer.Name + " with no live entity.");
                 return;
             }
 
-            if (!_placementHold.IsHeldBy(message.Entity, context.ConnectionId))
+            if (!_placementHold.IsHeldBy(message.Entity, context.Peer))
             {
                 CoopPlugin.Log.LogInfo("[placement-hold] ignored state for entity="
-                    + PlacementInterop.Describe(message.Entity) + " not held by connection="
-                    + context.ConnectionId + ".");
+                    + PlacementInterop.Describe(message.Entity) + " not held by peer="
+                    + context.Peer.Name + ".");
                 return;
             }
 
@@ -167,7 +164,7 @@ namespace CardShopCoop.Modules.World
                 IsFlipped = message.IsFlipped,
             };
             _placementHold.ApplyState(state);
-            RuntimeContext.Broadcast(state);
+            Context.Broadcast(state);
         }
 
         /// <summary>Observes the host entering placement move mode. Vanilla <c>StartMoveObject</c>

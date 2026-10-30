@@ -23,7 +23,8 @@ needed; not every feature needs every file.
 - **Replicated object lifecycle belongs to `Modules/GameObjectIdentity`.** Host creation/removal
   hooks, entity identity allocation/binding, spawn/despawn messages, join lifecycle baselines, and
   per-kind object↔identity maps must not be added to a feature module. Feature modules keep only
-  state, animation, action replay, holds, contents, inventory, UI, and gameplay updates. A feature
+  state, animation, action prediction/resolution, holds, contents, inventory, UI, and gameplay
+  updates. A feature
   module that needs to create/remove a replicated object calls the identity adapter/lifecycle API;
   it does not broadcast its own spawn/despawn message.
 - **Feature messages carry live Unity object references, not entity IDs.** A message outside
@@ -50,23 +51,29 @@ needed; not every feature needs every file.
   handler applies it. A client hook normally sends one intent before local mutation; the host
   validates and applies it, then broadcasts the resulting state. Add a semantic rejection only
   when gameplay or UI actually needs one.
-- Send once through the fail-loud `Send`/`Broadcast` API. A send failure is a connection failure,
-  not feature-level backpressure.
+- Send through `ICoopContext.Send`, `ICoopContext.Broadcast`,
+  `ICoopContext.BroadcastExcept`, or `ICoopPeer.Send`. `CoopCore.SendMessage` is the single
+  internal send path. Never pass or expose a connection id; address a peer by the `ICoopPeer`
+  object. A send failure is a connection failure, not feature-level backpressure.
+- `ActionMessage` is for a predicted, validated, undoable command. `INetMessage` is for one-way,
+  non-predicted messages and continuous state. A discrete world interaction another player can
+  interfere with is an `ActionMessage`.
 - Send one baseline when a peer joins. If a local scene object is not ready, retain only the latest
   authoritative state and apply it from that object's lifecycle hook; do not poll or add a network
   readiness handshake.
 - Normal play uses the smallest useful authoritative delta; full snapshots are join baselines only.
 - Clients act immediately through the game's own path. A client command derives from
-  `ActionMessage` and overrides `OnApply`/`OnUndo`; `context.Send` fills the one generic
-  `ActionId` and records the local replay/reverse. The host runs `OnApply` and then the module's
-  `[MessageHandler]` publishes authority. A rejected command uses the one generic
-  action-rollback message, and the host may send the affected entity's authoritative state to the
-  requester immediately before that rollback, through the module's normal state messages with the
-  rejected action id, so the client reconciles to authority instead of inverting a snapshot
-  authority has already moved past. Do not add new rejection message types, revisions, or
-  per-module recovery protocols. Rejections that bypass a module's apply validation (world not in
-  game, sender not yet admitted, an invalid intent identity) carry only the generic rollback, so
-  undo methods must stay correct without a refresh.
+  `ActionMessage`; `Context.Send` fills the one `ActionId` and records it for the response. The
+  host handler always applies the command itself and returns `ActionOutcome.Applied(response)` or
+  `ActionOutcome.Reject(reason, response)`, where the response carries the host's post-action state.
+  On the client, `OnUndo` reverses the prediction and `OnMerge` applies the response state exactly
+  once on every resolution (after `OnUndo` when rejected). Do not use `OnApply`, keys, follower
+  replay, or per-module rejection protocols. A predicted action that changes shared state must
+  answer with its post-action state on both accept and reject.
+- A client action that is still awaiting its host decision owns its local artifact until it
+  resolves. Track the artifact by `ActionId` in the module's own map. An older authoritative state
+  may arrive first; it must not destroy the pending artifact. The action's `OnMerge` is the
+  authoritative settle point.
 - A client action that is still awaiting its host decision owns the entity until it resolves. An
   authoritative hold, descriptor, or pose that reaches the client before that decision crossed the
   local action on the wire and describes its older state, so it must not be applied over the

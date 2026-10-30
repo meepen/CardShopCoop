@@ -1,5 +1,5 @@
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -7,17 +7,19 @@ using HarmonyLib;
 using System;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Hud
 {
     [ClientBehaviour]
     public sealed class HudClientBehaviour : CoopBehaviour
     {
-        private const string PredictionScope = "hud";
         private HudAuthoritativeState _pending;
         private bool _shutdown;
         private bool _initialized;
         private static HudClientBehaviour _active;
+
+        internal static HudClientBehaviour Active => _active;
         private int _highestNotifiedLevel = -1;
         private bool _hasAuthoritativeLevel;
         // Per-kind counters bumped whenever an authoritative absolute for that kind is applied.
@@ -142,17 +144,39 @@ namespace CardShopCoop.Modules.Hud
             }
 
 
-            var version = VersionFor(kind);
-            ActionLedger.Submit(
-                PredictionScope,
-                actionId => RuntimeContext.Send(1, new HudContributionIntent
-                {
-                    ActionId = actionId,
-                    Kind = kind,
-                    Value = value,
-                }),
-                () => ApplyContribution(kind, value),
-                () => RestoreUnlessSuperseded(kind, version, previous));
+            Context.Send(new HudContributionIntent
+            {
+                Kind = kind,
+                Value = value,
+                Previous = Clone(previous),
+                Version = VersionFor(kind),
+            });
+        }
+
+        /// <summary>Reverses one rejected contribution to its captured pre-change snapshot unless
+        /// an authoritative absolute for that kind has arrived since.</summary>
+        internal void UndoContribution(HudContributionIntent message)
+        {
+            if (_shutdown || message?.Previous == null)
+            {
+                return;
+            }
+
+            RestoreUnlessSuperseded(message.Kind, message.Version, message.Previous);
+        }
+
+        /// <summary>Applies the host's absolute wallet/progress/fame snapshot carried by the
+        /// contribution response.</summary>
+        internal void MergeContribution(HudContributionIntent message,
+            ActionResponseMessage response)
+        {
+            if (_shutdown || response is not HudContributionResponse answer
+                || answer.State == null)
+            {
+                return;
+            }
+
+            Apply(answer.State);
         }
 
         private int VersionFor(HudContributionKind kind)
@@ -217,9 +241,9 @@ namespace CardShopCoop.Modules.Hud
                 return;
             }
 
-            // The delta carries the host's ABSOLUTE wallet. Retire our own pending contribution and
-            // always fold the absolute in, so a host edit that interleaved with our optimistic
-            // change (which the optimistic apply alone cannot reproduce) does not drift.
+            // The delta carries the host's ABSOLUTE wallet. Fold it in, so a host edit that
+            // interleaved with our optimistic change (which the optimistic apply alone cannot
+            // reproduce) does not drift.
             //
             // The mod does not fabricate a money popup here. The client plays vanilla, so every
             // change the local player causes runs the game's own CEventPlayer_Add/ReduceCoin handler
@@ -228,8 +252,7 @@ namespace CardShopCoop.Modules.Hud
             // that a remote player's spend now updates the wallet silently (it only reaches the
             // guest as an absolute SetCoin, which the game never pops).
 
-            ActionLedger.Confirm(message.ActionId,
-                () => ApplyWallet(message.Coins, message.CoinDisplay));
+            ApplyWallet(message.Coins, message.CoinDisplay);
         }
 
         [MessageHandler]
@@ -240,11 +263,8 @@ namespace CardShopCoop.Modules.Hud
                 return;
             }
 
-            // Absolute exp/level: retire our own pending contribution and always fold the host's
-            // values in (see the wallet handler).
-
-            ActionLedger.Confirm(message.ActionId,
-                () => ApplyProgress(message.Experience, message.Level));
+            // Absolute exp/level: always fold the host's values in (see the wallet handler).
+            ApplyProgress(message.Experience, message.Level);
         }
 
         [MessageHandler]
@@ -255,11 +275,8 @@ namespace CardShopCoop.Modules.Hud
                 return;
             }
 
-            // Absolute fame: retire our own pending contribution and always fold the host's
-            // value in (see the wallet handler).
-
-            ActionLedger.Confirm(message.ActionId,
-                () => ApplyFame(message.Fame));
+            // Absolute fame: always fold the host's value in (see the wallet handler).
+            ApplyFame(message.Fame);
         }
 
         private void Apply(HudAuthoritativeState state)
@@ -498,7 +515,7 @@ namespace CardShopCoop.Modules.Hud
                     || !active.RuntimeContext.InGame() || evt == null
                     || active._applyingSnapshot != 0
                     || EconomyActionScope.Active
-                    || ActionLedger.IsApplying || ActionLedger.IsReconciling)
+                    || ReentrancyGuard.Suppressed(active))
                 {
                     return;
                 }

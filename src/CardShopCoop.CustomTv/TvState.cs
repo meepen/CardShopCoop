@@ -23,7 +23,8 @@ namespace CardShopCoop.CustomTv
     /// One immutable snapshot of one TV. It is extended information owned by the TV's
     /// <see cref="InteractableObject"/>, so the identity module replicates it per TV with the
     /// same stable id on both peers. The operation and action id identify which client action
-    /// (if any) produced this snapshot so the client can confirm or roll back its action.
+    /// (if any) produced this snapshot, and <see cref="Rejected"/> tells the acting client to
+    /// reverse its prediction before the snapshot is applied.
     /// </summary>
     [HostOnlyInformation]
     public sealed class TvState : ExtendGameObjectInformation<InteractableObject>, IActionValue

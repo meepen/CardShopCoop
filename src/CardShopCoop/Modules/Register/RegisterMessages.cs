@@ -4,26 +4,24 @@ using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Register
 {
-    /// <summary>The one register command shape. An <see cref="ActionMessage"/> is recorded on the
-    /// client and applied on the host; the concrete type is the action, so a handler only receives
-    /// fields that apply to it.</summary>
+    /// <summary>The one register command shape. An <see cref="ActionMessage"/> is sent by the
+    /// client and applied by the host; the concrete type is the action, so a handler only receives
+    /// fields that apply to it. The host answers with a <see cref="RegisterSnapshot"/> value, which
+    /// carries the counter's absolute state and settles the action.</summary>
     public abstract class RegisterIntent : ActionMessage
     {
         /// <summary>The live cashier counter the intent targets.</summary>
         public InteractableCashierCounter Counter;
 
-        /// <summary>Most register commands restore their entity from the authoritative snapshot
-        /// under the rejected action id, so the message itself has nothing to reverse.</summary>
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
+        /// <summary>Clears this action's local ownership/awaiting bookkeeping once its register
+        /// state has been applied. A rejected action has already undone its local artifact.</summary>
+        public override void OnMerge(ActionResponseMessage response)
+            => RegisterClientBehaviour.Active?.Settle(this);
     }
 
     [NetworkMessage]
     public sealed class RegisterClaimIntent : RegisterIntent
     {
-        public override void OnApply() => RegisterActions.Claim(Counter);
-
         public override void OnUndo(ActionResponseMessage response)
             => RegisterClientBehaviour.Active?.UndoClaim(this);
     }
@@ -31,8 +29,6 @@ namespace CardShopCoop.Modules.Register
     [NetworkMessage]
     public sealed class RegisterReleaseIntent : RegisterIntent
     {
-        public override void OnApply() => RegisterActions.Release(Counter);
-
         public override void OnUndo(ActionResponseMessage response)
             => RegisterClientBehaviour.Active?.UndoRelease(this);
     }
@@ -41,24 +37,18 @@ namespace CardShopCoop.Modules.Register
     public sealed class RegisterScanItemIntent : RegisterIntent
     {
         public int Slot;
-
-        public override void OnApply() => RegisterActions.ScanItem(Counter, Slot);
     }
 
     [NetworkMessage]
     public sealed class RegisterScanCardIntent : RegisterIntent
     {
         public int Slot;
-
-        public override void OnApply() => RegisterActions.ScanCard(Counter, Slot);
     }
 
     [NetworkMessage]
     public sealed class RegisterTakePaymentIntent : RegisterIntent
     {
         public bool IsCard;
-
-        public override void OnApply() => RegisterActions.TakePayment(Counter, IsCard);
     }
 
     [NetworkMessage]
@@ -73,8 +63,6 @@ namespace CardShopCoop.Modules.Register
         [NonSerialized]
         public bool WalletApplied;
 
-        public override void OnApply() => WalletApplied = RegisterActions.CardPayment(Counter, Value);
-
         public override void OnUndo(ActionResponseMessage response)
             => RegisterClientBehaviour.Active?.UndoCardPayment(this);
     }
@@ -85,9 +73,6 @@ namespace CardShopCoop.Modules.Register
         public int Slot;
         public bool IsCoin;
         public bool TakeBack;
-
-        public override void OnApply() =>
-            RegisterActions.Change(Counter, Slot, IsCoin, TakeBack);
     }
 
     [NetworkMessage]
@@ -104,8 +89,6 @@ namespace CardShopCoop.Modules.Register
         /// replay or a follower undo cannot reverse the same income twice. Not serialized.</summary>
         [NonSerialized]
         public bool WalletApplied;
-
-        public override void OnApply() => WalletApplied = RegisterActions.Complete(Counter);
 
         public override void OnUndo(ActionResponseMessage response)
             => RegisterClientBehaviour.Active?.UndoComplete(this);

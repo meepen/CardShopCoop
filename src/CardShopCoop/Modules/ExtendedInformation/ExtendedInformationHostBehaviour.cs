@@ -17,12 +17,13 @@ namespace CardShopCoop.Modules.ExtendedInformation
         [OnFullyJoined]
         private void SendBaseline(PeerConnection connection)
         {
-            if (connection == null)
+            var peer = PeerHandle.ForConnection(connection);
+            if (peer == null)
             {
                 return;
             }
 
-            RuntimeContext.Send(connection.Id, ExtendedInformationModule.BuildBaseline());
+            peer.Send(ExtendedInformationModule.BuildBaseline());
         }
     }
 }

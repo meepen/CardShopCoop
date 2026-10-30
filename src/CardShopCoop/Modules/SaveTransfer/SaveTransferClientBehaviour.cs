@@ -379,7 +379,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             SaveTransferRuntime.ReportFailure(reason);
             _failureReason = reason;
             _disconnectAfterFailureAt = Time.realtimeSinceStartup + 0.25f;
-            RuntimeContext.Send(1, new TransferFailureMessage { Reason = reason });
+            RuntimeContext.Send(new TransferFailureMessage { Reason = reason });
         }
 
         private static string BoundWarning(string warning)
@@ -404,7 +404,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 return;
             }
-            owner.RuntimeContext.Send(1, new FullyJoinedMessage());
+            owner.RuntimeContext.Send(new FullyJoinedMessage());
         }
 
         internal void Shutdown()

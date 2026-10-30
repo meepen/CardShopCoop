@@ -134,7 +134,7 @@ namespace CardShopCoop.Modules.SaveTransfer
         /// Called by Core after Hello authentication has passed and the connection entered
         /// Transferring. The callback must queue Core's Welcome frame before it returns.
         /// </summary>
-        public static bool TryAuthorizeAndSend(PeerConnection target,
+        internal static bool TryAuthorizeAndSend(PeerConnection target,
             Func<SaveTransferOffer, bool> sendHandshakeOffer, Action afterOfferQueued = null)
         {
             var owner = _active;
@@ -424,7 +424,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("world transfer session ended before send");
             }
 
-            owner.RuntimeContext.Send(target.Id, message);
+            target.Send(message);
         }
 
         private static void SendHandshakeOffer(SaveTransferHostBehaviour owner,

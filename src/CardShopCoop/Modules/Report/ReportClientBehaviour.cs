@@ -4,7 +4,6 @@ using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Register;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -192,8 +191,7 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            ActionLedger.AckOrApply(message.ActionId,
-                () => ApplyState(ToState(message)));
+            ApplyState(ToState(message));
         }
 
         private static ReportStateMessage ToState(ReportDeltaMessage message)
@@ -234,7 +232,7 @@ namespace CardShopCoop.Modules.Report
         [OnClientDisconnected]
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
-            if (connection?.Id != 1)
+            if (PeerHandle.ForConnection(connection)?.IsHost != true)
             {
                 return;
             }
@@ -607,7 +605,7 @@ namespace CardShopCoop.Modules.Report
             if (!_nextDayLocalReady)
             {
                 _nextDayLocalReady = true;
-                RuntimeContext.Send(1, new ReportNextDayReadyMessage());
+                Context.Send(new ReportNextDayReadyMessage());
             }
 
             ApplyNextDayWaitUi();

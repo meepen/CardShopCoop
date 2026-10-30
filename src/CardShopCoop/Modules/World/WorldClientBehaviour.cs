@@ -1,10 +1,7 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
-using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
-using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
 {
@@ -30,22 +27,22 @@ namespace CardShopCoop.Modules.World
 
             _instance = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            _boxNetworkInteraction = new BoxNetworkInteraction(false, _ => { }, SendWorldCommand);
+            // A client never broadcasts world state: every world command goes to the host, which
+            // records it as a prediction and answers it through the framework.
+            _boxNetworkInteraction = new BoxNetworkInteraction(false, _ => { },
+                (_, message) => Context.Send(message));
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction,
-                SendWorldCommand);
-            _shelfInteraction = new ShelfInteraction(SendWorldCommand);
+                (_, message) => Context.Send(message));
+            _shelfInteraction = new ShelfInteraction(Context, false);
             _warehouseShelfInteraction = new WarehouseShelfInteraction(false, _ => { },
-                SendWorldCommand, _boxNetworkInteraction, _playerBoxInteraction,
-                () => RuntimeContext.InGame());
+                (_, message) => Context.Send(message), _boxNetworkInteraction,
+                _playerBoxInteraction, () => Context.InGame);
             _cardInteraction = new WorldCardInteraction(RuntimeContext, false, _boxNetworkInteraction,
                 _playerBoxInteraction)
             {
-                SendOverride = SendWorldCommand
+                SendOverride = (_, message) => Context.Send(message),
             };
-            // Guards for in-flight graded binder removals live as long as their prediction; the
-            // tracker's retirement event is the one deterministic cleanup point.
-            ActionLedger.ActionSettled += WorldCardInteraction.OnActionSettled;
-            _cardInteraction.Containers.SendOp = message => SendWorldCommand(1, message);
+            _cardInteraction.Containers.SendOp = message => Context.Send(message);
             _cardInteraction.Containers.InGameProvider = RuntimeContext.InGame;
             _cardInteraction.Containers.ReloadingProvider = RuntimeContext.PreloadHold;
             // The join container baseline can name a placement the guest rebuilds only after it,
@@ -85,7 +82,6 @@ namespace CardShopCoop.Modules.World
             _boxNetworkInteraction = null;
             _warehouseShelfInteraction?.Reset();
             _warehouseShelfInteraction = null;
-            ActionLedger.ActionSettled -= WorldCardInteraction.OnActionSettled;
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -127,7 +123,7 @@ namespace CardShopCoop.Modules.World
         [OnFullyJoined]
         private void SendWorldReady(PeerConnection connection)
         {
-            if (RuntimeContext.InGame())
+            if (Context.InGame)
             {
                 _cardInteraction?.FlushWorldReady();
                 _warehouseShelfInteraction?.FlushClientState();
@@ -136,47 +132,6 @@ namespace CardShopCoop.Modules.World
         }
 
         internal static WorldCardInteraction ActiveCards => _instance?._cardInteraction;
-
-        private void SendWorldCommand(int connectionId, INetMessage message)
-        {
-            if (message is not WorldIntentMessage command)
-            {
-                throw new InvalidOperationException("World client can only send WorldIntentMessage values.");
-            }
-
-            // Direct sends from the interaction classes are fire-and-forget intents (a shelf
-            // removal, a covered-hold drop, the workbench bundle, a legacy card forward). They
-            // still need a real prediction id: the host's intent ledger rejects an empty one.
-            // None of them has the id pending on any client, so an echo is applied exactly as a
-            // remote change, never consumed as a prediction.
-            if (command.ActionId == Guid.Empty)
-            {
-                command.ActionId = Guid.NewGuid();
-            }
-
-            RuntimeContext.Send(connectionId, command);
-        }
-
-        // A fire-and-forget forward (a covered-hold drop, an item-box state mirror) still needs a
-        // real prediction id: the host's intent ledger requires one and treats an empty id as an
-        // unauthenticated, dedupe-unscoped message. It is not a prediction here - no client has it
-        // pending - so every valid peer simply applies the echo.
-        internal static bool SendClientIntent(WorldIntentMessage command)
-            => SendClientIntent(command,
-                command == null || command.ActionId == Guid.Empty
-                    ? Guid.NewGuid() : command.ActionId);
-
-        internal static bool SendClientIntent(WorldIntentMessage command, Guid actionId)
-        {
-            if (_instance == null || command == null)
-            {
-                return false;
-            }
-
-            command.ActionId = actionId;
-            _instance.RuntimeContext.Send(1, command);
-            return true;
-        }
 
         internal static void BeginWorldBaseline(long baselineId)
         {

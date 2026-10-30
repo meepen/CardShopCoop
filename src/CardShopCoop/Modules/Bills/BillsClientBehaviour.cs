@@ -1,11 +1,12 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Bills
 {
@@ -15,6 +16,8 @@ namespace CardShopCoop.Modules.Bills
     {
         private static BillsClientBehaviour _active;
         private bool _shutdown;
+
+        internal static BillsClientBehaviour Active => _active;
         private bool _initialized;
         private bool _joined;
         private BillsStateMessage _pendingState;
@@ -86,17 +89,10 @@ namespace CardShopCoop.Modules.Bills
                 return;
             }
 
-            // ApplyAuthoritative, not Confirm/AckOrApply: the host always sends absolute values
-            // (the zeroed bill on accept, or the current authoritative bills under the rejected
-            // id), and a delta can resolve an OLDER payment while a newer payment is still in
-            // flight on the same key. Confirm would retire the older id and apply these absolute
-            // values over the newer pending payment, wiping its optimistic effect (and its later
-            // suppressed rollback would then invert a state it no longer owns).
-            // ApplyAuthoritative undoes that newer payment, applies authority, and replays it, so
-            // every in-flight payment keeps owning its bills until its own decision arrives. An
-            // accrued bill during the round trip still lands: authority is always applied.
-
-            ActionLedger.ApplyAuthoritative(message.ActionId, () => ApplyDelta(message));
+            // Absolute host state. Every payment answered by a BillPaymentResponse settles on the
+            // response itself, so ambient accrual and host-local payments are the only producers
+            // of this message.
+            ApplyDelta(message);
         }
 
         [MessageHandler]
@@ -184,13 +180,11 @@ namespace CardShopCoop.Modules.Bills
         /// <summary>
         /// Client intent for a bill payment. In a session the vanilla payment does not run: the
         /// same bill zeroing the game would do is applied locally as a prediction (so the bill
-        /// panel and total update immediately), the intent is sent, and the host's accepted delta
-        /// retires the prediction or its rollback adds the same captured values back. The redo and
-        /// undo are relative deltas of the captured bills, so they stay exact inverses when a
-        /// rejection arrives without an authoritative refresh and ActionLedger has to layer it
-        /// over other pending payments. The wallet is host-owned - the guest never queues a coin
-        /// event - so the mirror only moves when the host's authoritative wallet snapshot arrives,
-        /// and a rejection has nothing to refund.
+        /// panel and total update immediately), and the captured bills are carried on the message
+        /// so <see cref="BillPaymentMessage.OnUndo"/> can add them back. The host answers with its
+        /// absolute bill state whether it accepts or refuses the payment. The wallet is host-owned
+        /// - the guest never queues a coin event - so the mirror only moves when the host's
+        /// authoritative wallet snapshot arrives, and a rejection has nothing to refund.
         /// </summary>
         private static bool BeginPayment(byte billType, bool forcePay)
         {
@@ -226,24 +220,39 @@ namespace CardShopCoop.Modules.Bills
             ApplyPayment(billType, rent, electric, employee, refund: false);
             BillsInterop.Refresh(BillsInterop.FindScreen());
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
-            ActionLedger.Submit(
-                "bills",
-                actionId => client.RuntimeContext.Send(1, new BillPaymentMessage
-                {
-                    ActionId = actionId,
-                    BillType = billType,
-                }),
-                () =>
-                {
-                    ApplyPayment(billType, rent, electric, employee, refund: false);
-                    BillsInterop.Refresh(BillsInterop.FindScreen());
-                },
-                () =>
-                {
-                    ApplyPayment(billType, rent, electric, employee, refund: true);
-                    BillsInterop.Refresh(BillsInterop.FindScreen());
-                });
+            client.Context.Send(new BillPaymentMessage
+            {
+                BillType = billType,
+                Rent = rent,
+                Electric = electric,
+                Employee = employee,
+            });
             return false;
+        }
+
+        /// <summary>Reverses the predicted payment with the bills captured when it ran.</summary>
+        internal void UndoPayment(BillPaymentMessage message)
+        {
+            if (_shutdown || message == null)
+            {
+                return;
+            }
+
+            ApplyPayment(message.BillType, message.Rent, message.Electric, message.Employee,
+                refund: true);
+            BillsInterop.Refresh(BillsInterop.FindScreen());
+        }
+
+        /// <summary>Applies the host's absolute bill state carried by the payment response.</summary>
+        internal void MergePayment(BillPaymentMessage message, ActionResponseMessage response)
+        {
+            if (_shutdown || response is not BillPaymentResponse payment
+                || payment.State == null)
+            {
+                return;
+            }
+
+            ApplyDelta(payment.State);
         }
 
         /// <summary>The amount the vanilla payment debits: each relevant bill's positive balance.</summary>
@@ -267,11 +276,9 @@ namespace CardShopCoop.Modules.Bills
 
         /// <summary>Applies (or reverses) exactly the bill zeroing a payment performs. The
         /// vanilla <c>SetBill(type, 0, 0)</c> is mirrored as a relative subtraction of the values
-        /// captured at payment time - identical to vanilla when nothing moved, but an exact
-        /// inverse under ActionLedger's layered rejection, where restoring a whole captured
-        /// snapshot would resurrect another still-pending payment's optimistic values when a
-        /// rollback arrives without an authoritative refresh. Pay All clears all three bills;
-        /// a single payment clears only the selected type, matching the vanilla presses.</summary>
+        /// captured at payment time, so the undo is an exact inverse of the prediction. Pay All
+        /// clears all three bills; a single payment clears only the selected type, matching the
+        /// vanilla presses. The host's absolute state follows in <see cref="MergePayment"/>.</summary>
         private static void ApplyPayment(byte billType, BillValue rent, BillValue electric,
             BillValue employee, bool refund)
         {

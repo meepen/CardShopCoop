@@ -20,7 +20,7 @@ namespace CardShopCoop.Modules.SaveTransfer
         public static void ClearBorrowedWorldIfSafe(bool inGame)
             => SaveTransferRuntime.ClearBorrowedWorldIfSafe(inGame);
 
-        public static void ConfigureCore(Func<CoopRole> role = null,
+        internal static void ConfigureCore(Func<CoopRole> role = null,
             Func<int> generation = null, Func<int, bool> isGenerationCurrent = null,
             Func<Action, bool> enqueueMainThread = null, object transferLock = null,
             Action fullyJoinedEmitter = null, Action<string> failureReporter = null,
@@ -29,7 +29,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 enqueueMainThread, transferLock, fullyJoinedEmitter, failureReporter,
                 transferFailure);
 
-        public static bool TryAuthorizeAndSend(PeerConnection target,
+        internal static bool TryAuthorizeAndSend(PeerConnection target,
             Func<SaveTransferOffer, bool> sendHandshakeOffer, Action afterOfferQueued = null)
             => SaveTransferHostBehaviour.TryAuthorizeAndSend(target, sendHandshakeOffer,
                 afterOfferQueued);

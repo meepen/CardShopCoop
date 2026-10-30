@@ -1,6 +1,5 @@
 using CardShopCoop.Api;
 using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
 
 namespace CardShopCoop.Modules.Register
@@ -39,7 +38,7 @@ namespace CardShopCoop.Modules.Register
             {
                 ReleaseStation(counter);
             }
-            else if (snapshot.Rejected && ActionLedger.IsPending(counter, snapshot.ActionId)
+            else if (snapshot.Rejected && IsPendingActionFor(counter, snapshot.ActionId)
                 && StationIsCheckedOut(counter))
             {
                 // A rejected checkout can arrive after the local completion checked the carrier
@@ -69,10 +68,9 @@ namespace CardShopCoop.Modules.Register
             }
 
             var state = snapshot.State;
-            // A pending local action owns the entity until its echo/rollback. Only that action's
-            // own state may apply; an older host state must wait, not walk the action back.
-            if (ActionLedger.IsPending(counter)
-                && !ActionLedger.IsPending(counter, snapshot.ActionId))
+            // A pending local action owns the entity until its own answer. Only that action's
+            // state may apply; an older host state must wait, not walk the action back.
+            if (HasPendingAction(counter) && !IsPendingActionFor(counter, snapshot.ActionId))
             {
                 _awaiting.Add(counter);
                 return false;
@@ -93,9 +91,7 @@ namespace CardShopCoop.Modules.Register
                 return false;
             }
 
-            var rendered = false;
-            ActionLedger.Apply(snapshot.ActionId, snapshot.Rejected,
-                () => rendered = Render(counter, state, customer));
+            var rendered = Render(counter, state, customer);
 
             if (!rendered)
             {

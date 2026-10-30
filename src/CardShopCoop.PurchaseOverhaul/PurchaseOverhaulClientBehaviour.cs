@@ -8,7 +8,7 @@ namespace CardShopCoop.PurchaseOverhaul
     /// <summary>
     /// Guest half of Purchase Overhaul co-op support. It intercepts the mod's own order and
     /// licence funnels before they mutate the local wallet or delivery queue, sends one command to
-    /// the host, and applies the host's answer through OnMerge/OnUndo.
+    /// the host, and applies the host's answer in the action's OnMerge.
     /// </summary>
     [ClientBehaviour]
     public sealed class PurchaseOverhaulClientBehaviour : CoopBehaviour
@@ -117,7 +117,7 @@ namespace CardShopCoop.PurchaseOverhaul
                 return false;
             }
 
-            if (Context.HostConnection == null)
+            if (Context.Host == null)
             {
                 message = "Not connected to the host.";
                 return false;
@@ -148,7 +148,7 @@ namespace CardShopCoop.PurchaseOverhaul
 
             try
             {
-                Context.Send(Context.HostConnection, request);
+                Context.Send(request);
             }
             catch (Exception error)
             {
@@ -189,7 +189,7 @@ namespace CardShopCoop.PurchaseOverhaul
 
             try
             {
-                Context.Send(Context.HostConnection, request);
+                Context.Send(request);
             }
             catch (Exception error)
             {

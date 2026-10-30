@@ -52,7 +52,7 @@ namespace CardShopCoop.Modules.SaveTransfer
         }
 
         /// <summary>Called by Core during the migration. All arguments are optional.</summary>
-        public static void ConfigureCore(Func<CoopRole> role = null,
+        internal static void ConfigureCore(Func<CoopRole> role = null,
             Func<int> generation = null, Func<int, bool> isGenerationCurrent = null,
             Func<Action, bool> enqueueMainThread = null, object transferLock = null,
             Action fullyJoinedEmitter = null, Action<string> failureReporter = null,

@@ -3,12 +3,11 @@ using System;
 namespace CardShopCoop.Api
 {
     /// <summary>
-    /// A player in the session, for messages that name someone other than their sender. The
-    /// identity on the wire is <see cref="Id"/>, which is host-canonical: 0 is the host and
-    /// 1..N are clients, in the ids the host assigned. <see cref="Name"/> travels as the sender's
-    /// snapshot; <see cref="IsHost"/> is derived from the id and <see cref="IsSelf"/> is local.
+    /// A player in the session, for messages that name someone other than their sender.
+    /// <see cref="Name"/>, <see cref="IsHost"/> and <see cref="IsSelf"/> are the public identity;
+    /// the underlying id is internal wire identity and must not be used by an integrating mod.
     /// A <see cref="PlayerRef"/> in a DTO is a reference supplied by the sender, not an
-    /// authentication token; use <see cref="CoopMessageContext.Sender"/> for the authenticated
+    /// authentication token; use <see cref="CoopMessageContext.Peer"/> for the authenticated
     /// sender of an inbound message.
     /// </summary>
     public sealed class PlayerRef : IEquatable<PlayerRef>
@@ -21,8 +20,9 @@ namespace CardShopCoop.Api
             IsSelf = isSelf;
         }
 
-        /// <summary>Host-canonical player id: 0 is the host, 1..N are clients.</summary>
-        public int Id
+        /// <summary>Host-canonical wire identity: 0 is the host, 1..N are clients. Internal to
+        /// the framework; compare <see cref="PlayerRef"/> objects instead.</summary>
+        internal int Id
         {
             get;
         }
@@ -50,6 +50,6 @@ namespace CardShopCoop.Api
         public override int GetHashCode() => Id;
 
         public override string ToString() => Name
-            ?? (IsHost ? "Host" : "Player " + Id);
+            ?? (IsHost ? "Host" : "Player");
     }
 }

@@ -13,12 +13,10 @@ namespace CardShopCoop.Modules.Catalog
     }
 
     /// <summary>Host-authoritative catalog entitlement delta. State, not a command: the host
-    /// owns every entitlement. <see cref="ActionId"/> retires the purchase prediction this delta
-    /// answers.</summary>
+    /// owns every entitlement.</summary>
     [NetworkMessage]
     public sealed class CatalogLicenseDeltaMessage : INetMessage
     {
-        public Guid ActionId;
         public bool Scanner;
         public bool Unlocked;
         public EItemType ItemType;

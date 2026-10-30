@@ -1,7 +1,6 @@
 using System;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -23,8 +22,6 @@ namespace CardShopCoop.Modules.Shop
         private ShopRenamer _pendingRenamer;
         private bool _pendingShowIntro;
         private bool _tutorialNamingPending;
-        private const string RenameScope = "shop.rename";
-        private const string RenameLockScope = "shop.rename.lock";
 
         private void OnEnable()
         {
@@ -49,9 +46,8 @@ namespace CardShopCoop.Modules.Shop
 
         /// <summary>The host's authoritative rename/lock state. The store owns the baseline and
         /// the wire; this handler projects the changed fields onto the local game state. Because
-        /// the value implements <see cref="IActionValue"/>, the framework wraps this handler in
-        /// <see cref="ActionLedger"/> so the pending rename or lock action is retired on an
-        /// accepted echo or undone before a rejection re-anchor is applied.</summary>
+        /// the value implements <see cref="IActionValue"/>, the framework settles a pending rename
+        /// or lock prediction on its echo and reverses it before a rejection re-anchor.</summary>
         [GlobalInformationHandler]
         private void HandleState(InformationChange<ShopRenameState> change)
         {
@@ -266,7 +262,7 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            var host = ((ICoopContext)RuntimeContext).HostConnection;
+            var host = Context?.Host;
             if (host == null)
             {
                 CoopPlugin.Log.LogWarning("[shop] dropped " + message.GetType().Name
@@ -274,7 +270,7 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            RuntimeContext.Send(host.Id, message);
+            Context.Send(message);
         }
 
         /// <summary>Repaints the name and draft from the store once the scene's renamer surface
@@ -334,34 +330,25 @@ namespace CardShopCoop.Modules.Shop
         }
 
         /// <summary>Records the client's rename proposal the game already performed. Vanilla's
-        /// confirm runs in every state, so the action only supplies the replay/undo closures and
-        /// the sign is synced directly.</summary>
+        /// confirm runs in every state, so the action only supplies the undo and the sign is synced
+        /// directly.</summary>
         private void PredictRenameObserved()
         {
             var (name, previous) = CaptureRename();
-            var actionId = ActionLedger.Submit(
-                RenameScope,
-                new ShopRenameRequestIntent { Name = name },
-                () => ShopState.Apply(name),
-                () =>
-                {
-                    // The host may have accepted another rename before this rejection landed.
-                    // Only undo while our own optimistic name is still painted; the host's
-                    // canonical state message is sent under the rejected action id so it is
-                    // applied as authority.
-                    if (previous != null && ShopState.IsPainted(name))
-                    {
-                        ShopState.Apply(previous);
-                    }
-                });
-            if (actionId == Guid.Empty)
+            var intent = new ShopRenameRequestIntent
+            {
+                Name = name,
+                PreviousName = previous,
+            };
+            if (Context?.Host == null)
             {
                 throw new InvalidOperationException(
                     "the shop rename intent could not be sent: there is no live host connection.");
             }
 
-            // Vanilla already performed the rename locally; keep the sign in step without
-            // double-applying through the action replay.
+            Context.Send(intent);
+
+            // Vanilla already performed the rename locally; keep the sign in step.
             ShopState.Apply(name);
         }
 
@@ -452,20 +439,22 @@ namespace CardShopCoop.Modules.Shop
 
             _pendingRenamer = renamer;
             _pendingShowIntro = showIntro;
-            var actionId = ActionLedger.Submit(
-                RenameLockScope,
-                new ShopRenameLockIntent(),
-                OpenPendingRenameUi,
-                CancelPendingRenameUi,
-                ShowBusyNotice);
-            if (actionId == Guid.Empty)
+            var intent = new ShopRenameLockIntent
+            {
+                Accepted = OpenPendingRenameUi,
+                Reversed = CancelPendingRenameUi,
+            };
+            if (Context?.Host == null)
             {
                 // The request never left this peer; do not hold a pending open that only a
                 // grant could ever run.
                 CoopPlugin.Log.LogError("Shop rename lock request was not sent: there is no live "
                     + "host connection.");
                 CancelPendingRenameUi();
+                return;
             }
+
+            Context.Send(intent);
         }
 
         private void OpenPendingRenameUi()
@@ -509,20 +498,22 @@ namespace CardShopCoop.Modules.Shop
 
         private void SendAcquire()
         {
-            var actionId = ActionLedger.Submit(
-                RenameLockScope,
-                new ShopRenameLockIntent(),
-                () => { },
-                AbandonLocalEdit,
-                ShowBusyNotice);
-            if (actionId == Guid.Empty)
+            var intent = new ShopRenameLockIntent
+            {
+                Accepted = () => { },
+                Reversed = AbandonLocalEdit,
+            };
+            if (Context?.Host == null)
             {
                 // We lost the lock and cannot ask for it back; close the dead editor instead of
                 // leaving this player typing into a UI the host will refuse.
                 CoopPlugin.Log.LogError("Shop rename lock re-request was not sent: there is no live "
                     + "host connection.");
                 AbandonLocalEdit();
+                return;
             }
+
+            Context.Send(intent);
         }
 
         private void AbandonLocalEdit()

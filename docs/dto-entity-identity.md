@@ -18,8 +18,8 @@ packaging boxes keep their Guid. Game-save indices and type enums are not entity
 - **Lifecycle messages** create or remove an entity, or may arrive before the receiver has it.
   They are owned by `GameObjectIdentity` and carry a polymorphic `EntityDescriptor`; they never
   rely on a live object field.
-- **Correlation IDs** such as `ActionId`, baseline ids, card/data indices, and UI list indices
-  are not entity identities and stay unchanged.
+- **Correlation IDs** such as the framework-filled `ActionId`, baseline ids, card/data indices,
+  and UI list indices are not entity identities.
 
 ## Wire conversion
 
@@ -47,9 +47,9 @@ field then maps that default to `null`. Callers never receive a half-valid entit
 
 `PlayerRef` is the player identity for the wire: id 0 is the host, 1..N are clients in the ids the
 host assigned. The sender's name snapshot travels with the id; `IsHost` is derived from id 0 and
-`IsSelf` is computed locally, so a reference is usable before the roster syncs. `PeerConnection` is
-transport only: its id is a local view (a client calls the host 1; the host calls its first client
-1), so it must not be used as a shared player identity.
+`IsSelf` is computed locally, so a reference is usable before the roster syncs. The public API
+addresses players as `ICoopPeer` objects (`Name`, `IsHost`, `IsSelf`, `Player`); there are no
+connection ids for players, and the transport `PeerConnection` type is internal.
 
 ## Lifecycle ownership
 
@@ -62,9 +62,9 @@ transport only: its id is a local view (a client calls the host 1; the host call
 - per-kind client materialisation/destruction
 - the single object/identity cache
 
-Feature modules keep state, animation, action replay, holds, contents, inventory, UI, and other
-gameplay updates. They do not carry spawn/despawn messages, join lifecycle baselines, identity
-allocators, object↔identity maps, or creation/removal Harmony hooks.
+Feature modules keep state, animation, action prediction and resolution, holds, contents,
+inventory, UI, and other gameplay updates. They do not carry spawn/despawn messages, join
+lifecycle baselines, identity allocators, object↔identity maps, or creation/removal Harmony hooks.
 
 Lifecycle descriptors are polymorphic. `EntityDescriptor` is the base; the concrete types are
 `NpcEntityDescriptor`, `PlacementEntityDescriptor`, `DecorationEntityDescriptor`, and

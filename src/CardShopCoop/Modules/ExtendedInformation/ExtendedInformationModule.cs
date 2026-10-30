@@ -454,7 +454,7 @@ namespace CardShopCoop.Modules.ExtendedInformation
             {
                 if (CoopCore.Role == CoopRole.Client && current is IActionValue value)
                 {
-                    ActionLedger.Apply(value, () => method.Invoke(target, arguments));
+                    ActionLedger.ApplyValue(value, () => method.Invoke(target, arguments));
                     return;
                 }
 
@@ -1079,7 +1079,7 @@ namespace CardShopCoop.Modules.ExtendedInformation
                 return;
             }
 
-            context.Send(1, new ExtendedInformationIntentMessage
+            context.Send(new ExtendedInformationIntentMessage
             {
                 Operation = operation,
                 Id = id,

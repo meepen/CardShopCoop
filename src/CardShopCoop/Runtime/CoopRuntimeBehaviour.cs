@@ -1,4 +1,5 @@
 using System;
+using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using UnityEngine;
 
@@ -136,17 +137,18 @@ namespace CardShopCoop.Runtime
         internal void IncludeExternalPersistentBehaviours()
             => _registry?.AddExternalPersistent();
 
-        public void ClientJoined(PeerConnection connection)
-            => Guard("client-joined", () => _registry?.ClientJoined(connection));
+        internal void ClientJoined(PeerConnection connection)
+            => Guard("client-joined", () => _registry?.ClientJoined(PeerHandle.BindIdentity(connection)));
 
-        public void ClientDisconnected(PeerConnection connection, DisconnectInfo info)
+        internal void ClientDisconnected(PeerConnection connection, DisconnectInfo info)
         {
             Context?.PeerPresence.Clear(connection == null ? 0 : connection.Id);
-            Guard("client-disconnected", () => _registry?.ClientDisconnected(connection, info));
+            Guard("client-disconnected", () => _registry?.ClientDisconnected(
+                PeerHandle.BindIdentity(connection), info));
         }
 
-        public void FullyJoined(PeerConnection connection)
-            => Guard("fully-joined", () => _registry?.FullyJoined(connection));
+        internal void FullyJoined(PeerConnection connection)
+            => Guard("fully-joined", () => _registry?.FullyJoined(PeerHandle.BindIdentity(connection)));
 
         public void SessionStarted()
             => Guard("session-started", () => _registry?.SessionStarted());

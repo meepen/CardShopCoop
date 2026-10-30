@@ -174,7 +174,7 @@ namespace CardShopCoop.Modules.Register
             denial = default;
             sender = null;
             owner = null;
-            if (_shutdown || context?.Connection == null || message == null)
+            if (_shutdown || context?.Peer == null || message == null)
             {
                 denial = IntentValidation.Deny("session is not active");
                 return false;
@@ -192,7 +192,7 @@ namespace CardShopCoop.Modules.Register
                 return false;
             }
 
-            sender = context.Sender;
+            sender = context.Peer.Player;
             if (sender == null)
             {
                 denial = IntentValidation.Deny("player is not in the roster yet");
@@ -265,7 +265,7 @@ namespace CardShopCoop.Modules.Register
 
         private void Reject(CoopMessageContext context, RegisterIntent message, string reason)
         {
-            if (_shutdown || context?.Connection == null || message?.Counter == null)
+            if (_shutdown || context?.Peer == null || message?.Counter == null)
             {
                 return;
             }

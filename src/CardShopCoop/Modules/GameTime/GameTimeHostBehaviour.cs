@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.GameTime
                 return;
             }
 
-            RuntimeContext.Send(connection.Id, message);
+            connection.Send(message);
         }
 
         internal void Shutdown()

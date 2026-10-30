@@ -1,3 +1,4 @@
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using UnityEngine;
 
@@ -12,8 +13,9 @@ namespace CardShopCoop.Modules.World
         /// <summary>The live object being held.</summary>
         public InteractableObject Entity;
 
-        /// <summary>Connection id of the holder, stamped by the host (0 = the host itself).</summary>
-        public int MoverConnectionId;
+        /// <summary>The holder, stamped by the host from the authenticated sender. Null on a begin
+        /// request, which only carries what the mover observed about its own hold.</summary>
+        public PlayerRef Mover;
 
         /// <summary>The holder's camera at the instant the hold began. This seeds the observer's
         /// target inference before the next presence sample arrives.</summary>

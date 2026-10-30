@@ -161,7 +161,7 @@ namespace CardShopCoop
             => backend.Id + (mode == ConnectMode.Host ? "|host" : "|join");
         public string EffectivePlayerName => PresenceApi.LocalPlayerName;
 
-        public ICoopTransport Net
+        internal ICoopTransport Net
         {
             get; private set;
         }
@@ -313,7 +313,8 @@ namespace CardShopCoop
                 () => SessionGeneration,
                 IsSessionGeneration,
                 action => _dispatcher.TryEnqueue("save-transfer", action),
-                fullyJoinedEmitter: () => Send(1, new FullyJoinedMessage()),
+                fullyJoinedEmitter: () => SendMessage(PeerHandle.Host(),
+                    new FullyJoinedMessage()),
                 failureReporter: reason =>
                 {
                     var text = reason ?? "world transfer failed";
@@ -334,10 +335,9 @@ namespace CardShopCoop
             UI.CoopMenus.Init();
             _persistentRuntime = gameObject.AddComponent<PersistentRuntimeBehaviour>();
             _persistentRuntime.InitializePersistent(new CoopRuntimeContext(
-                _messageRouter, InGameLevel, Broadcast,
-                Send, ConnectionIds, PresenceApi.PeerName,
+                _messageRouter, InGameLevel,
                 (text, seconds) => SetStatus(text), () => SaveTransferApi.PreloadHold,
-                null, null, Connections));
+                null, PresenceApi.PeerName, Connections));
             SceneManager.sceneLoaded += OnSceneLoaded;
             Util.GameLoadingGuard.Install();
 
@@ -1183,9 +1183,7 @@ namespace CardShopCoop
             }
 
             var context = new CoopRuntimeContext(_messageRouter, InGameLevel,
-                Broadcast, Send, ConnectionIds,
-                PresenceApi.PeerName, (text, seconds) => SetStatus(text),
-                () => SaveTransferApi.PreloadHold,
+                (text, seconds) => SetStatus(text), () => SaveTransferApi.PreloadHold,
                 (connectionId, info) =>
                 {
                     var connection = ConnectionFor(connectionId);
@@ -1194,7 +1192,7 @@ namespace CardShopCoop
                         Net?.GracefulDisconnect(connection, info);
                     }
                 },
-                Relay, Connections);
+                PresenceApi.PeerName, Connections);
             _liveRuntimeContext = context;
             _runtime = Role == CoopRole.Host
                 ? gameObject.AddComponent<ServerRuntimeBehaviour>()
@@ -1766,86 +1764,159 @@ namespace CardShopCoop
             }
         }
 
-        /// <summary>Submits a client ActionMessage through the action ledger. ActionMessage always
-        /// means a command in the public contract; a one-way message must be an INetMessage.</summary>
-        private bool TrySubmitClientAction(INetMessage message)
+        /// <summary>
+        /// The one path that hands a single message to a peer. A client prediction is recorded in
+        /// the action ledger before it leaves, so its response can always settle it; a failed
+        /// send removes that record again. The host never sends an ActionMessage command.
+        /// </summary>
+        internal void SendMessage(ICoopPeer target, INetMessage message)
         {
-            if (Role != CoopRole.Client || !ActionLedger.IsActive
-                || message is not ActionMessage action)
+            if (target == null)
             {
-                return false;
+                throw new ArgumentNullException(nameof(target));
+            }
+            if (message == null)
+            {
+                throw new ArgumentNullException(nameof(message));
             }
 
-            if (action.ActionId != Guid.Empty)
+            if (Role == CoopRole.Client)
             {
-                // A direct world/intent send may mint its own id for host dedupe without being a
-                // local prediction. Explicit ActionLedger.Submit sends are already pending and
-                // follow the same path. Both are ordinary sends here; only an empty id opts into
-                // the automatic ledger submission below.
-                return false;
+                if (!target.IsSelf && !target.IsHost)
+                {
+                    throw new InvalidOperationException(
+                        "A client can only send to the host.");
+                }
+
+                if (message is ActionMessage action)
+                {
+                    ActionLedger.Record(action);
+                    try
+                    {
+                        RawSend(target, action);
+                    }
+                    catch
+                    {
+                        ActionLedger.Forget(action.ActionId);
+                        throw;
+                    }
+
+                    return;
+                }
+            }
+            else if (message is ActionMessage)
+            {
+                throw new InvalidOperationException(
+                    "The host sends state or ActionResponseMessage, never an ActionMessage command.");
             }
 
-            // The action id is allocated and recorded before the message leaves, so a plain
-            // module only has to send the command.
-            ActionLedger.Submit(action);
-            return true;
+            RawSend(target, message);
         }
 
-        private void Send(int connectionId, INetMessage message)
+        /// <summary>From the host, fans out to every ready peer; from a client, sends to the
+        /// host. Recipient admission belongs to the transport.</summary>
+        internal void BroadcastMessage(INetMessage message)
         {
-            if (TrySubmitClientAction(message))
+            if (message == null)
             {
+                throw new ArgumentNullException(nameof(message));
+            }
+
+            if (Role == CoopRole.Client)
+            {
+                SendMessage(PeerHandle.Host(), message);
                 return;
             }
 
-            var connection = ConnectionFor(connectionId);
+            if (message is ActionMessage)
+            {
+                throw new InvalidOperationException(
+                    "The host sends state or ActionResponseMessage, never an ActionMessage command.");
+            }
+            if (Net == null)
+            {
+                CoopPlugin.Log.LogError("application broadcast failed: no live transport for message "
+                    + message.GetType().FullName);
+                throw new InvalidOperationException("application broadcast has no live transport for message "
+                    + message.GetType().FullName);
+            }
+
+            Net.Broadcast(message);
+        }
+
+        /// <summary>Fans a host message out to every ready peer except one. Routed through the
+        /// transport's relay admission so it shares Broadcast's recipient policy instead of a
+        /// per-connection send that would disconnect a joining peer.</summary>
+        internal void BroadcastExceptMessage(ICoopPeer except, INetMessage message)
+        {
+            if (except == null)
+            {
+                throw new ArgumentNullException(nameof(except));
+            }
+            if (message == null)
+            {
+                throw new ArgumentNullException(nameof(message));
+            }
+            if (message is ActionMessage)
+            {
+                throw new InvalidOperationException(
+                    "The host sends state or ActionResponseMessage, never an ActionMessage command.");
+            }
+            if (Role != CoopRole.Host)
+            {
+                throw new InvalidOperationException(
+                    "Only the host broadcasts to every peer except one.");
+            }
+            if (Net == null)
+            {
+                CoopPlugin.Log.LogError("application relay failed: no live transport for message "
+                    + message.GetType().FullName);
+                throw new InvalidOperationException("application relay has no live transport for message "
+                    + message.GetType().FullName);
+            }
+            if (Net is not ICoopRelayTransport relay)
+            {
+                throw new InvalidOperationException("the live transport has no relay seam for message "
+                    + message.GetType().FullName);
+            }
+
+            var connection = ConnectionForPeer(except);
+            if (connection == null)
+            {
+                throw new InvalidOperationException(
+                    "BroadcastExcept requires a peer owned by this session.");
+            }
+
+            relay.Relay(message, connection.Id);
+        }
+
+        /// <summary>Hands a single message to the live transport. Peer handles are the module
+        /// addressing; a lifecycle callback may also pass the connection object it received,
+        /// which implements the same <see cref="ICoopPeer"/> contract.</summary>
+        private void RawSend(ICoopPeer target, INetMessage message)
+        {
+            var connection = ConnectionForPeer(target);
             if (connection == null || Net == null)
             {
-                CoopPlugin.Log.LogError("application send failed: no live connection "
-                    + connectionId + " for message " + message?.GetType().FullName);
-                throw new InvalidOperationException("application send has no live connection "
-                    + connectionId + " for message " + message?.GetType().FullName);
+                CoopPlugin.Log.LogError("application send failed: no live connection for message "
+                    + message?.GetType().FullName);
+                throw new InvalidOperationException(
+                    "application send has no live connection for message "
+                    + message?.GetType().FullName);
             }
 
             Net.Send(connection, message);
         }
 
-        private void Broadcast(INetMessage message)
-        {
-            if (TrySubmitClientAction(message))
+        /// <summary>The transport connection behind a peer handle or a lifecycle connection. Only
+        /// the core reaches this; modules keep addressing the <see cref="ICoopPeer"/> object.</summary>
+        private static PeerConnection ConnectionForPeer(ICoopPeer peer)
+            => peer switch
             {
-                return;
-            }
-
-            if (Net == null)
-            {
-                CoopPlugin.Log.LogError("application broadcast failed: no live transport for message "
-                    + message?.GetType().FullName);
-                throw new InvalidOperationException("application broadcast has no live transport for message "
-                    + message?.GetType().FullName);
-            }
-            Net.Broadcast(message);
-        }
-
-        /// <summary>Fans a host message out to every ready peer except the originating one.
-        /// Routed through the internal relay seam so it shares Broadcast's recipient admission
-        /// instead of a per-connection send that would disconnect a joining peer.</summary>
-        private void Relay(int exceptConnectionId, INetMessage message)
-        {
-            if (Net == null)
-            {
-                CoopPlugin.Log.LogError("application relay failed: no live transport for message "
-                    + message?.GetType().FullName);
-                throw new InvalidOperationException("application relay has no live transport for message "
-                    + message?.GetType().FullName);
-            }
-            if (Net is not ICoopRelayTransport relay)
-            {
-                throw new InvalidOperationException("the live transport has no relay seam for message "
-                    + message?.GetType().FullName);
-            }
-            relay.Relay(message, exceptConnectionId);
-        }
+                PeerHandle handle => handle.Connection,
+                PeerConnection connection => connection,
+                _ => null,
+            };
 
         private PeerConnection ConnectionFor(int id)
         {
@@ -1861,11 +1932,6 @@ namespace CardShopCoop
                 }
             }
             return null;
-        }
-
-        private IReadOnlyList<int> ConnectionIds()
-        {
-            return Net == null ? Array.Empty<int>() : Net.Connections.Select(c => c.Id).ToArray();
         }
 
         private IReadOnlyList<PeerConnection> Connections()

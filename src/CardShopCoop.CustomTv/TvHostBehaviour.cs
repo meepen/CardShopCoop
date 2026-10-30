@@ -157,11 +157,28 @@ namespace CardShopCoop.CustomTv
             }
 
             // Apply on the host before publishing so the snapshot is captured from the state the
-            // command produced. The framework must not apply a second time.
-            message.OnApply();
+            // command produced. The handler applies the command itself, so it returns Applied.
+            try
+            {
+                message.Apply();
+            }
+            catch (InvalidOperationException)
+            {
+                // The TV was unloaded while the control ran. If its state is gone there is
+                // nothing to publish, so let the failure surface; otherwise the host refused the
+                // control and answers with the unchanged current state.
+                var current = TvInterop.ControllerFor(message.Tv);
+                if (!TvInterop.Present || current == null
+                    || TvInterop.OwnerOf(current)?.GetExtendedInformation<TvState>() == null)
+                {
+                    throw;
+                }
 
-            // Publish the resulting state under the action id; the EIM IActionValue wrapper
-            // retires or reverses the sender's action.
+                message.Rejected = true;
+            }
+
+            // Publish the resulting state under the action id; the EIM handler applies it and
+            // settles the sender's action with that state.
             var controller = TvInterop.ControllerFor(message.Tv);
             if (controller == null)
             {
@@ -172,8 +189,11 @@ namespace CardShopCoop.CustomTv
 
             if (message.Rejected)
             {
+                // The command was refused without changing the TV. Publish the unchanged state
+                // so every client, including the sender, converges on it, and reject the action
+                // so the sender reverses its prediction.
                 PublishRejected(controller, message.ActionId);
-                return ActionOutcome.Applied();
+                return ActionOutcome.Reject("the host refused the TV control");
             }
 
             var operation = message.Operation;
@@ -417,8 +437,7 @@ namespace CardShopCoop.CustomTv
         }
 
         /// <summary>Publishes the TV's current state as the authoritative answer to a rejected
-        /// action. The sender's ledger undoes its prediction, applies this value, and replays any
-        /// newer pending action on the same TV.</summary>
+        /// action. The sender reverses its prediction, then applies this value.</summary>
         private void PublishRejected(Component controller, Guid actionId)
         {
             var previous = TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>();

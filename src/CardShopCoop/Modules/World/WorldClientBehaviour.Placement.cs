@@ -1,5 +1,5 @@
 using System;
-using CardShopCoop.Modules.Actions;
+using System.Collections.Generic;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -13,11 +13,14 @@ namespace CardShopCoop.Modules.World
     /// placement entity.</summary>
     public sealed partial class WorldClientBehaviour
     {
-        private const string PredictionScope = "placement";
         private PlacementBaselineMessage _latestBaseline;
         private InteractableObject _movingObject;
         private PlacementMoveEntry _movingBefore;
         private bool _identityReady;
+        // Latest unresolved move prediction per object. A newer move supersedes an older one, so
+        // only the latest prediction may merge its response; older resolutions stay silent.
+        private readonly Dictionary<InteractableObject, PlacementMoveIntentMessage> _pendingMoves =
+            new(PlacementObjectComparer.Instance);
 
         internal bool IdentityReady => _identityReady;
 
@@ -40,6 +43,7 @@ namespace CardShopCoop.Modules.World
             _identityReady = false;
             _movingObject = null;
             _movingBefore = null;
+            _pendingMoves.Clear();
         }
 
         /// <summary>The identity module created or bound a placement entity. A baseline that
@@ -70,7 +74,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>Sent once this peer is fully connected. The join baseline can arrive while
         /// the guest's scene is still settling (objects finishing their load-time spawn or their
         /// recovery from the transferred save), so ask the host for one fresh pass now that the
-        /// scene is up. The host answers this connection only.</summary>
+        /// scene is up. The host answers this peer only.</summary>
         private void RequestPlacementBaseline(PeerConnection connection)
         {
             if (connection == null)
@@ -79,7 +83,7 @@ namespace CardShopCoop.Modules.World
             }
 
             CoopPlugin.Log.LogInfo("[placement] fully connected; requesting a fresh state baseline.");
-            RuntimeContext.Send(connection.Id, new PlacementBaselineRequestMessage());
+            Context.Send(new PlacementBaselineRequestMessage());
         }
 
         [MessageHandler]
@@ -89,6 +93,16 @@ namespace CardShopCoop.Modules.World
                 || message.Entity.Entity == null)
             {
                 CoopPlugin.Log.LogWarning("[placement] dropped delta with no live entity.");
+                return;
+            }
+
+            if (HasPendingMove(message.Entity.Entity))
+            {
+                // This state crossed our newer local move on the wire. The move's own response is
+                // the settle point, so an older authoritative pose must not drag it back.
+                CoopPlugin.Log.LogInfo("[placement] skipped delta op=" + message.Operation
+                    + " entity=" + PlacementInterop.Describe(message.Entity.Entity)
+                    + " while a local move is pending.");
                 return;
             }
 
@@ -158,11 +172,67 @@ namespace CardShopCoop.Modules.World
         private void ForgetPlacementObject(InteractableObject obj)
         {
             _placementHold?.LocalEnded(obj);
+            if (obj != null)
+            {
+                _pendingMoves.Remove(obj);
+            }
+
             if (ReferenceEquals(_movingObject, obj))
             {
                 _movingObject = null;
                 _movingBefore = null;
             }
+        }
+
+        private bool HasPendingMove(InteractableObject obj)
+            => obj != null && _pendingMoves.ContainsKey(obj);
+
+        private bool IsLatestPendingMove(PlacementMoveIntentMessage action)
+            => action?.Move?.Entity != null
+                && _pendingMoves.TryGetValue(action.Move.Entity, out var latest)
+                && ReferenceEquals(latest, action);
+
+        /// <summary>True while this peer is moving the object again. An older response must not
+        /// drag the object out from under the newer, still-unsettled move.</summary>
+        private bool IsMovingAgain(PlacementMoveIntentMessage action)
+            => action?.Move?.Entity != null && _movingBefore != null
+                && ReferenceEquals(_movingObject, action.Move.Entity);
+
+        /// <summary>Client: reverse this move's prediction. A superseded move stays silent because
+        /// a newer local move now owns the object.</summary>
+        internal void UndoPlacementMove(PlacementMoveIntentMessage action)
+        {
+            if (_shutdown || action?.Before == null || !IsLatestPendingMove(action)
+                || IsMovingAgain(action))
+            {
+                return;
+            }
+
+            ApplyMovePrediction(action.Before, false);
+        }
+
+        /// <summary>Client: apply the host's post-action pose. This is the settle point for the
+        /// prediction and only the latest move for an object may write it.</summary>
+        internal void MergePlacementMove(PlacementMoveIntentMessage action,
+            PlacementMoveResponse response)
+        {
+            if (_shutdown || action == null)
+            {
+                return;
+            }
+
+            var latest = IsLatestPendingMove(action);
+            if (latest)
+            {
+                _pendingMoves.Remove(action.Move.Entity);
+            }
+
+            if (!latest || response?.Move == null || IsMovingAgain(action))
+            {
+                return;
+            }
+
+            ApplyMovePrediction(response.Move, false);
         }
 
         private bool TryApplyDelta(PlacementDeltaMessage message)
@@ -179,18 +249,12 @@ namespace CardShopCoop.Modules.World
 
             using (Writes.Enter())
             {
-                // The host applies the exact Move entry the guest sent and stamps the prediction
-                // id (a stale intent is rejected via a prediction rollback), so this delta confirms
-                // the move. Reconciling would snap the piece back to its pre-move pose first.
-                ActionLedger.AckOrApply(message.ActionId, () =>
+                if (!PlacementEntityState.Apply(message))
                 {
-                    if (!PlacementEntityState.Apply(message))
-                    {
-                        throw new InvalidOperationException(
-                            "placement delta could not be applied for entity="
-                            + PlacementInterop.Describe(message.Entity.Entity));
-                    }
-                });
+                    throw new InvalidOperationException(
+                        "placement delta could not be applied for entity="
+                        + PlacementInterop.Describe(message.Entity.Entity));
+                }
             }
 
             PlacementInterop.NotifyStructureChanged(-1);
@@ -230,26 +294,23 @@ namespace CardShopCoop.Modules.World
             }
 
             // The game already placed the object, so its settled state is the post-action state
-            // (unboxed with the final pose); the prediction only records how to redo and undo it.
-            // The live entity is the whole identity: no key or type is sent with the move.
-            var after = PlacementEntityState.Capture(obj).ToEntry();
-            var before = _movingBefore;
+            // (unboxed with the final pose); the prediction records the pre-move pose for undo
+            // and leaves the authoritative settle to the host's response.
+            var action = new PlacementMoveIntentMessage
+            {
+                Move = PlacementEntityState.Capture(obj).ToEntry(),
+                Before = _movingBefore,
+                Origin = this,
+            };
             _movingObject = null;
             _movingBefore = null;
-            ActionLedger.Submit(
-                PredictionScope,
-                actionId => RuntimeContext.Send(1, new PlacementMoveIntentMessage
-                {
-                    ActionId = actionId,
-                    Move = after,
-                }),
-                () => ApplyMovePrediction(after, true),
-                () => ApplyMovePrediction(before, false));
+            // The framework allocates the action id while sending and records the prediction.
+            _pendingMoves[obj] = action;
+            Context.Send(action);
         }
 
-        /// <summary>Runs a recorded move through the game's own placement path: redo on replay of a
-        /// surviving prediction, undo on a rollback. Kept out of the prediction closure so both
-        /// directions share the single game-path helper.</summary>
+        /// <summary>Runs a recorded pose through the game's own placement path. The undo and
+        /// authoritative merge both use this one helper.</summary>
         private void ApplyMovePrediction(PlacementMoveEntry entry, bool settle)
         {
             using (Writes.Enter())
@@ -276,6 +337,7 @@ namespace CardShopCoop.Modules.World
             _identityReady = false;
             _movingObject = null;
             _movingBefore = null;
+            _pendingMoves.Clear();
         }
 
         /// <summary>Prediction/state hooks only. Creation and removal are installed by the

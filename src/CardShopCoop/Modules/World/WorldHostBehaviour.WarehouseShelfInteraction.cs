@@ -21,50 +21,61 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleWarehouseStore(MessageContext context,
-            WarehouseStoreMessage message)
+        private ActionOutcome HandleWarehouseStore(CoopMessageContext context,
+            WarehouseStoreAction message)
         {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
+            if (Warehouse == null)
             {
-                return RejectWorldIntent(context, message);
+                return ActionOutcome.Reject("warehouse sync is not running");
             }
 
-            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
+            if (message?.Shelf == null || message.Box == null || !Context.InGame
+                || !context.IsAuthenticated)
             {
-                if (Warehouse == null || message?.Shelf == null || message.Box == null)
-                {
-                    CoopPlugin.Log.LogWarning("[warehouse] dropped store: the shelf or box did not "
-                        + "resolve to a live object.");
-                    return false;
-                }
+                return Warehouse.RefuseStore(message,
+                    "the session is not ready for world actions");
+            }
 
-                return Warehouse.HostApplyStore(message, context.ConnectionId,
-                    response => SendWorldTo(context.ConnectionId, response));
-            }));
+            var outcome = Warehouse.HostApplyStore(message, out var broadcast);
+            if (broadcast != null)
+            {
+                // The actor merges the same state from its response, so it is excluded here. A
+                // take must never be applied twice on the peer that already performed it.
+                Context.BroadcastExcept(context.Peer, broadcast);
+            }
+
+            return outcome;
         }
 
         [MessageHandler]
-        private ActionOutcome HandleWarehouseTake(MessageContext context,
-            WarehouseTakeMessage message)
+        private ActionOutcome HandleWarehouseTake(CoopMessageContext context,
+            WarehouseTakeAction message)
         {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
+            if (Warehouse == null)
             {
-                return RejectWorldIntent(context, message);
+                return ActionOutcome.Reject("warehouse sync is not running");
             }
 
-            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
+            if (message?.Source?.Shelf == null || message.CreatedBox == null || !Context.InGame
+                || !context.IsAuthenticated)
             {
-                if (Warehouse == null || message?.Source?.Shelf == null
-                    || message.CreatedBox == null)
-                {
-                    CoopPlugin.Log.LogWarning("[warehouse] dropped take: the source shelf or created "
-                        + "box descriptor did not resolve.");
-                    return false;
-                }
+                return Warehouse.RefuseTake(message,
+                    "the session is not ready for world actions");
+            }
 
-                return Warehouse.HostApplyTake(message, context.ConnectionId,
-                    response => SendWorldTo(context.ConnectionId, response));
-            }));
+            var outcome = Warehouse.HostApplyTake(message, out var broadcast, out var grantedHold);
+            if (broadcast != null)
+            {
+                Context.BroadcastExcept(context.Peer, broadcast);
+            }
+
+            if (grantedHold != null)
+            {
+                // The delta above already named the box to every peer; the hold must follow it.
+                Warehouse.AnnounceGrantedHold(grantedHold, context.Peer);
+            }
+
+            return outcome;
         }
 
         private void NotifyStoredBoxRecordAdded(ShelfCompartment compartment)

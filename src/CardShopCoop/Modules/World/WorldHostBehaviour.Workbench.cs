@@ -1,3 +1,4 @@
+using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 using HarmonyLib;
@@ -10,8 +11,8 @@ namespace CardShopCoop.Modules.World
 
         private void InstallWorkbench()
         {
-            _workbenchInteraction = new WorldWorkbenchInteraction(true, BroadcastWorld, SendWorldTo,
-                () => RuntimeContext.InGame());
+            _workbenchInteraction = new WorldWorkbenchInteraction(true, Context.Broadcast,
+                (peer, message) => peer.Send(message), () => Context.InGame);
             Harmony.CreateClassProcessor(typeof(HostWorkbenchAddItemPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(HostWorkbenchRemoveItemPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(HostWorkbenchTakeItemToHandPatch)).Patch();
@@ -27,11 +28,8 @@ namespace CardShopCoop.Modules.World
             _workbenchInteraction = null;
         }
 
-        private void AppendWorkbenchBaseline(int connectionId)
-        {
-            _workbenchInteraction?.AppendBaselineMessages(
-                message => SendWorldTo(connectionId, message));
-        }
+        private void AppendWorkbenchBaseline(Action<INetMessage> send)
+            => _workbenchInteraction?.AppendBaselineMessages(send);
 
         private void PublishWorkbenchStorage(InteractableWorkbench bench)
         {
@@ -44,58 +42,73 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleWorkbenchOp(MessageContext context, WorkbenchOpMessage message)
+        private ActionOutcome HandleWorkbenchOp(CoopMessageContext context, WorkbenchOpMessage message)
         {
-            if (message != null && message.Bench == null)
+            if (message?.Bench == null)
             {
                 CoopPlugin.Log.LogWarning("[workbench] dropped op with no live bench object.");
+                return ActionOutcome.Reject("the workbench did not resolve to a live object");
             }
 
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context)
-                && message != null && message.Bench != null)
+            if (_workbenchInteraction == null || !Context.InGame || !context.IsAuthenticated)
             {
-                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
-                {
-                    if (_workbenchInteraction != null && _workbenchInteraction.HostApplyOp(message))
-                    {
-                        return true;
-                    }
-
-                    // Refresh the failed edit with the bench's absolute authoritative state before
-                    // the generic rollback, so the client reconciles instead of replaying its
-                    // snapshot.
-                    var refresh = _workbenchInteraction?.BuildRefresh(message.Bench);
-                    if (refresh != null)
-                    {
-                        SendWorldTo(context.Connection.Id, refresh);
-                    }
-
-                    return false;
-                }));
+                return ActionOutcome.Reject("the session is not ready for world actions",
+                    _workbenchInteraction?.BuildResponse(message.Bench));
             }
 
-            return RejectWorldIntent(context, message);
+            var outcome = _workbenchInteraction.HostApplyOp(message);
+            if (outcome.Disposition == ActionDisposition.Applied)
+            {
+                PublishWorkbenchState(context.Peer, message.Bench);
+            }
+
+            return outcome;
         }
 
         [MessageHandler]
-        private ActionOutcome HandleWorkbenchBundle(MessageContext context,
+        private ActionOutcome HandleWorkbenchBundle(CoopMessageContext context,
             WorkbenchBundleMessage message)
         {
-            if (message != null && message.Bench == null)
+            if (message?.Bench == null)
             {
                 CoopPlugin.Log.LogWarning(
                     "[workbench] dropped bundle completion with no live bench object.");
+                return ActionOutcome.Reject("the workbench did not resolve to a live object");
             }
 
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context)
-                && message != null && message.Bench != null)
+            if (_workbenchInteraction == null || !Context.InGame || !context.IsAuthenticated)
             {
-                return CommandOutcome(ExecuteWorldCommand(context, message,
-                    () => _workbenchInteraction != null
-                        && _workbenchInteraction.HostCompleteBundle(message.Bench)));
+                return ActionOutcome.Reject("the session is not ready for world actions",
+                    _workbenchInteraction?.BuildResponse(message.Bench));
             }
 
-            return RejectWorldIntent(context, message);
+            var outcome = _workbenchInteraction.HostCompleteBundle(message);
+            if (outcome.Disposition == ActionDisposition.Applied)
+            {
+                PublishWorkbenchState(context.Peer, message.Bench);
+            }
+
+            return outcome;
+        }
+
+        /// <summary>Publishes the host's post-action bench state to every peer except the acting
+        /// client, whose own answer carries the same state in its action response.</summary>
+        private void PublishWorkbenchState(ICoopPeer actor, InteractableWorkbench bench)
+        {
+            var state = _workbenchInteraction?.BuildState(bench);
+            if (state == null)
+            {
+                return;
+            }
+
+            if (actor != null)
+            {
+                Context.BroadcastExcept(actor, state);
+            }
+            else
+            {
+                Context.Broadcast(state);
+            }
         }
 
         [HarmonyPatch(typeof(InteractableWorkbench), "AddItem")]

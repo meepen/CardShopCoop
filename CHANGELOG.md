@@ -1,5 +1,14 @@
 # CardShopCoopCommunity — Changelog
 
+## 2.3.0
+
+- Co-op mods now use `ActionMessage` for anything a player predicts and may need to undo. A mod makes its local change immediately, the host applies or refuses it, and the mod reverses the change when it is refused. One-way messages and notifications use `INetMessage`.
+- Players are now addressed as peer objects (`Context.Self`, `Context.Host`, `Context.Peers`). The old connection-id send calls are gone.
+- There are no longer any action keys to assign or match. Each command is answered and cleaned up on its own.
+- External co-op mods must be rebuilt against the new public API. The old action helpers and send calls were removed.
+- The public API now has its own stable version, `CardShopCoop.Api` 1.0.0, separate from the mod version.
+- Both players must update together, as usual.
+
 ## 2.2.1
 
 - Fixed: Lag when loading a new save or joining a world with certain mods.

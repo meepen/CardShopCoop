@@ -1,3 +1,4 @@
+using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -14,14 +15,21 @@ namespace CardShopCoop.Modules.StoreAccess
     {
         public byte Which;
 
-        /// <summary>The client's ledger replay/undo closures own the optimistic toggle; the
-        /// message is only the host command.</summary>
-        public override void OnApply()
-        {
-        }
+        /// <summary>The local flag before the click. Restores the prediction when the host
+        /// refuses the toggle.</summary>
+        [NonSerialized]
+        public bool Before;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            StoreAccessClientBehaviour.ApplyLocal(Which, Before);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            // StoreAccessState is an IActionValue: the extended-information handler projects the
+            // host's post-toggle state onto the flags and signs before this hook.
+            Before = false;
         }
     }
 }

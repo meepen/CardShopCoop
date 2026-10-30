@@ -5,7 +5,6 @@ using BepInEx;
 using BepInEx.Bootstrap;
 using CardShopCoop.Api;
 using CardShopCoop.Modules.ExtendedInformation;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Net.Protocol;
@@ -284,31 +283,6 @@ namespace CardShopCoop.Runtime
         // ---- ICoopBinding: the runtime half read by the public CoopApi facade ----
 
         public ICoopContext Context => CoopCore.Instance?.LiveContext;
-
-        public bool ActionActive => ActionLedger.IsActive;
-        public bool IsReconciling => ActionLedger.IsReconciling;
-        public bool IsApplying => ActionLedger.IsApplying;
-
-        public Guid Submit(string scope, ActionMessage message, Action apply,
-            Action<ActionResponseMessage> undo)
-            => ActionLedger.Submit(scope, message, apply, undo);
-
-        public void Ack(Guid actionId)
-            => ActionLedger.Ack(actionId);
-
-        public void AckOrApply(Guid actionId, Action apply)
-            => ActionLedger.AckOrApply(actionId, apply);
-
-        public void Confirm(Guid actionId, Action apply)
-            => ActionLedger.Confirm(actionId, apply);
-
-        public void ApplyAuthoritative(Guid actionId, Action apply)
-            => ActionLedger.ApplyAuthoritative(actionId, apply);
-
-        public bool IsPending(Guid actionId) => ActionLedger.IsPending(actionId);
-
-        public void Rollback(ICoopContext context, int connectionId, Guid actionId)
-            => ActionLedger.Rollback(context, connectionId, actionId);
 
         public object GetExtendedInformation(Type informationType, object gameObject)
             => ExtendedInformationModule.Get(informationType, gameObject);

@@ -8,9 +8,10 @@ namespace CardShopCoop.Api
     /// message; the framework fills <see cref="ActionId"/> from the request and sets
     /// <see cref="Rejected"/> from the handler's <see cref="ActionOutcome"/>.
     ///
-    /// Responses are intercepted by the client's action ledger and never require a
-    /// <c>[MessageHandler]</c>: accepted responses call <see cref="ActionMessage.OnMerge"/>,
-    /// rejected responses call <see cref="ActionMessage.OnUndo"/>.
+    /// A custom response carries state that only the acting client needs - typically the host's
+    /// post-action state - and derives from this type. Responses never require a
+    /// <c>[MessageHandler]</c>: the framework gives them to the action's
+    /// <see cref="ActionMessage.OnUndo"/> and <see cref="ActionMessage.OnMerge"/> hooks.
     /// </summary>
     public abstract class ActionResponseMessage : INetMessage
     {

@@ -6,7 +6,6 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
-using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
 {
@@ -29,52 +28,6 @@ namespace CardShopCoop.Modules.World
         // A later join never clobbers an earlier one, and each baseline reads only its own.
         private readonly Dictionary<int, WorldTransferManifest> _transferManifests = new();
 
-        // Host intent ledger. Every accepted world intent's prediction id is recorded once, keyed
-        // to the connection that sent it, so a resent intent cannot double-apply and a peer cannot
-        // retire another peer's prediction by naming its id. An id is a client-minted Guid, so no
-        // two connections share one.
-        //
-        // The per-connection set is bounded. Fire-and-forget world intents (covered-hold drops,
-        // item-box state mirrors, workbench bundles, legacy card forwards, forced placements) each
-        // mint a fresh Guid and are never explicitly retired, so an unbounded set would grow for a
-        // whole session. An entry only has to outlive the transport's resend window: the reliable
-        // lane retransmits a lost intent long before this many later intents arrive. Oldest-first
-        // eviction therefore keeps dedup and the cross-connection reject correct for every intent
-        // still in the window while capping memory. Eviction drops the reverse-index entry too, or
-        // the owner map would grow instead.
-        private readonly Dictionary<int, AppliedIntentLedger> _appliedPredictions = new();
-        private readonly Dictionary<Guid, int> _predictionOwners = new();
-
-        /// <summary>One connection's bounded, insertion-ordered set of applied world-intent ids.</summary>
-        private sealed class AppliedIntentLedger
-        {
-            // Generous relative to the transport resend window: a duplicate only ever arrives as a
-            // retransmission, separated from its original by at most a handful of later intents.
-            private const int Capacity = 512;
-            private readonly HashSet<Guid> _ids = new();
-            private readonly Queue<Guid> _order = new();
-
-            internal IEnumerable<Guid> Ids => _order;
-
-            /// <summary>Records an id and evicts the oldest once the cap is exceeded, reporting each
-            /// evicted id so the caller drops its reverse-index entry.</summary>
-            internal void Add(Guid id, Action<Guid> onEvicted)
-            {
-                if (!_ids.Add(id))
-                {
-                    return;
-                }
-
-                _order.Enqueue(id);
-                while (_order.Count > Capacity)
-                {
-                    var evicted = _order.Dequeue();
-                    _ids.Remove(evicted);
-                    onEvicted(evicted);
-                }
-            }
-        }
-
         private void OnEnable()
         {
             if (_initialized)
@@ -85,22 +38,25 @@ namespace CardShopCoop.Modules.World
 
             _instance = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            _boxNetworkInteraction = new BoxNetworkInteraction(true, BroadcastWorld, SendWorldTo);
-            _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, BroadcastWorld);
-            _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => RuntimeContext.InGame());
-            _warehouseShelfInteraction = new WarehouseShelfInteraction(true, BroadcastWorld,
-                SendWorldTo, _boxNetworkInteraction, _playerBoxInteraction,
-                () => RuntimeContext.InGame());
+            // One send seam. Host state is broadcast to every peer, or sent to the single peer
+            // that needs it; a relay excludes the sender. No helper keeps a connection id.
+            _boxNetworkInteraction = new BoxNetworkInteraction(true, Context.Broadcast,
+                (peer, message) => peer.Send(message));
+            _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, Context.Broadcast);
+            _shelfInteraction = new ShelfInteraction(Context, true);
+            _warehouseShelfInteraction = new WarehouseShelfInteraction(true, Context.Broadcast,
+                (peer, message) => peer.Send(message), _boxNetworkInteraction, _playerBoxInteraction,
+                () => Context.InGame);
             _cardInteraction = new WorldCardInteraction(RuntimeContext, true, _boxNetworkInteraction,
                 _playerBoxInteraction)
             {
-                BroadcastOverride = BroadcastWorld,
-                RelayOverride = RelayWorldExcept,
-                SendOverride = SendWorldTo
+                BroadcastOverride = Context.Broadcast,
+                RelayOverride = Context.BroadcastExcept,
+                SendOverride = (peer, message) => peer.Send(message),
             };
-            _cardInteraction.Containers.BroadcastState = BroadcastWorld;
-            _cardInteraction.Containers.SendToClient = SendWorldTo;
-            _cardInteraction.Containers.RelayState = RelayWorldExcept;
+            _cardInteraction.Containers.BroadcastState = Context.Broadcast;
+            _cardInteraction.Containers.SendToClient = (peer, message) => peer.Send(message);
+            _cardInteraction.Containers.RelayState = Context.BroadcastExcept;
             _cardInteraction.Containers.InGameProvider = RuntimeContext.InGame;
             InstallBoxNetworkInteractionPatches();
             InstallPlayerBoxInteractionPatches();
@@ -139,8 +95,6 @@ namespace CardShopCoop.Modules.World
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _nextBaselineId = 1;
             _transferManifests.Clear();
-            _appliedPredictions.Clear();
-            _predictionOwners.Clear();
             if (ReferenceEquals(_instance, this))
             {
                 _instance = null;
@@ -238,223 +192,46 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>How one validated world command resolved on the host. A duplicate is not a
-        /// failure: the first application stands, so the caller must acknowledge it without
-        /// applying or reversing anything.</summary>
-        internal enum WorldCommandResult
-        {
-            Applied,
-            Duplicate,
-            Rejected,
-        }
-
-        /// <summary>The handler outcome for one world command result. The authoritative state the
-        /// handler published first remains the settle path; the framework response that follows it
-        /// is a harmless acknowledgement (or the generic rollback for a rejection).</summary>
-        internal static ActionOutcome CommandOutcome(WorldCommandResult result)
-            => result == WorldCommandResult.Rejected
-                ? ActionOutcome.Reject("world command rejected")
-                : ActionOutcome.Applied();
-
-        /// <summary>Apply one validated client intent on the host. Successful operations publish
-        /// their authoritative state or the small gameplay handoff they require. The handler maps
-        /// the result to an <see cref="ActionOutcome"/>, so this never emits a rollback itself.</summary>
-        internal WorldCommandResult ExecuteWorldCommand(MessageContext context,
-            WorldIntentMessage command, Func<bool> apply)
-        {
-            if (context?.Connection == null || !WorldMessageMetadata.IsValidIntent(command))
-            {
-                CoopPlugin.Log.LogWarning("Rejected world intent with an invalid identity: "
-                    + DescribeIntent(command) + ".");
-                return WorldCommandResult.Rejected;
-            }
-
-            var connectionId = context.ConnectionId;
-            if (_predictionOwners.TryGetValue(command.ActionId, out var owner))
-            {
-                if (owner != connectionId)
-                {
-                    CoopPlugin.Log.LogWarning("Rejected world intent naming another connection's "
-                        + "prediction: " + DescribeIntent(command) + " owner=" + owner
-                        + " sender=" + connectionId + ".");
-                    return WorldCommandResult.Rejected;
-                }
-
-                // A duplicate of an intent this connection already got applied (a transport
-                // resend). Applying it a second time is the double-apply this ledger exists to
-                // stop, so drop it without applying: the first application stands.
-                CoopPlugin.Log.LogInfo("Dropped duplicate world intent from conn " + connectionId
-                    + ": " + DescribeIntent(command) + ".");
-                return WorldCommandResult.Duplicate;
-            }
-
-            _predictionOwners[command.ActionId] = connectionId;
-            if (!_appliedPredictions.TryGetValue(connectionId, out var applied))
-            {
-                applied = new AppliedIntentLedger();
-                _appliedPredictions[connectionId] = applied;
-            }
-
-            applied.Add(command.ActionId, evicted =>
-            {
-                if (_predictionOwners.TryGetValue(evicted, out var evictedOwner)
-                    && evictedOwner == connectionId)
-                {
-                    _predictionOwners.Remove(evicted);
-                }
-            });
-
-            if (apply == null || !apply())
-            {
-                CoopPlugin.Log.LogWarning("action rejected -> conn " + connectionId
-                    + " id=" + command.ActionId + " (host apply refused).");
-                return WorldCommandResult.Rejected;
-            }
-
-            return WorldCommandResult.Applied;
-        }
-
-        /// <summary>A peer left, so its applied-prediction ids can no longer be resent or named.
-        /// Drop the reverse index entries it owned and its per-connection set.</summary>
-        [OnClientDisconnected]
-        private void ForgetAppliedPredictions(PeerConnection connection, DisconnectInfo _)
-        {
-            if (connection == null
-                || !_appliedPredictions.TryGetValue(connection.Id, out var applied))
-            {
-                return;
-            }
-
-            foreach (var actionId in applied.Ids)
-            {
-                if (_predictionOwners.TryGetValue(actionId, out var owner)
-                    && owner == connection.Id)
-                {
-                    _predictionOwners.Remove(actionId);
-                }
-            }
-
-            _appliedPredictions.Remove(connection.Id);
-        }
-
-        /// <summary>Logs one refused world intent before host execution and returns the handler
-        /// outcome that asks the framework for the single generic rollback.</summary>
-        internal ActionOutcome RejectWorldIntent(MessageContext context, WorldIntentMessage command)
-        {
-            if (context?.Connection == null
-                || command?.ActionId == Guid.Empty)
-            {
-                return ActionOutcome.Reject("world intent has no actionable identity");
-            }
-
-            // Say which intent and why, so a recurring "before host execution" warning is
-            // diagnosable instead of a dead end: the handlers reject when the world is not in
-            // game, the sender has not reached FullyJoined yet, or the payload was null.
-            CoopPlugin.Log.LogWarning("Rejected world intent before host execution: "
-                + DescribeIntent(command) + " inGame=" + RuntimeContext.InGame()
-                + " connState=" + context.Connection.State + ".");
-            return ActionOutcome.Reject("world intent rejected before host execution");
-        }
-
-        private static string DescribeIntent(WorldIntentMessage command)
-            => command == null
-                ? "<null>"
-                : command.GetType().Name;
-
+        /// <summary>A peer finished joining and may receive gameplay traffic: send it the complete
+        /// shared-world baseline for its own world.</summary>
         [OnFullyJoined]
-        private void SendWarehouseBaseline(PeerConnection connection)
+        private void OnPeerFullyJoined(PeerConnection connection)
         {
-            if (connection != null && RuntimeContext.InGame())
+            var peer = PeerHandle.ForConnection(connection);
+            if (peer != null && Context.InGame)
             {
-                SendWorldBaseline(connection.Id);
+                SendWorldBaseline(peer);
             }
-
         }
 
-        /// <summary>A peer allowed to act on the shared world. Transferring counts: the guest's
-        /// world is loaded from the transferred save (that is exactly when it starts playing) and
-        /// only the baseline/ack round-trip is still in flight, so a guest that stocks a shelf in
-        /// that window must not have the action refused and rolled back. The host applies against
-        /// its own authoritative state either way, and reliable ordering plus the world client's
-        /// deferral of unresolved deltas keeps the baseline/delta order coherent.</summary>
-        internal bool IsJoinPhaseSender(MessageContext context)
-            => context?.Connection != null
-                && (context.Connection.State == ConnectionState.Transferring
-                    || context.Connection.State == ConnectionState.FullyJoined);
-
-        private void SendWorldBaseline(int connectionId)
+        private void SendWorldBaseline(ICoopPeer peer)
         {
-            if (connectionId <= 0)
-            {
-                return;
-            }
-
-
             var baselineId = _nextBaselineId++;
             if (_nextBaselineId <= 0)
             {
                 _nextBaselineId = 1;
             }
 
-            Util.MemoryProbe.Log("world-baseline:before conn=" + connectionId);
-            SendWorldTo(connectionId, new WorldBaselineStartMessage
+            Util.MemoryProbe.Log("world-baseline:before peer=" + peer.Name);
+            // Every baseline message is for this one joining peer only.
+            Action<INetMessage> send = peer.Send;
+            send(new WorldBaselineStartMessage
             {
                 BaselineId = baselineId,
             });
             // Carried boxes are not part of the box descriptor: a box a peer is already holding
             // would otherwise freeze at the transfer-time pose on the joiner instead of riding the
             // holder's avatar. Announce each hold after the descriptors that created the boxes.
-            AppendPlayerBoxHoldBaseline(message => SendWorldTo(connectionId, message));
-            _warehouseShelfInteraction?.AppendBaselineMessages(message => SendWorldTo(connectionId,
-                message));
-            _cardInteraction?.AppendBaselineMessages(message => SendWorldTo(connectionId,
-                message));
-            AppendWorkbenchBaseline(connectionId);
-            AppendCardDisplayBaseline(message => SendWorldTo(connectionId, message));
-            SendWorldTo(connectionId, new WorldBaselineCompleteMessage
+            AppendPlayerBoxHoldBaseline(send);
+            _warehouseShelfInteraction?.AppendBaselineMessages(send);
+            _cardInteraction?.AppendBaselineMessages(send);
+            AppendWorkbenchBaseline(send);
+            AppendCardDisplayBaseline(send);
+            send(new WorldBaselineCompleteMessage
             {
                 BaselineId = baselineId,
             });
-            Util.MemoryProbe.Log("world-baseline:after conn=" + connectionId);
+            Util.MemoryProbe.Log("world-baseline:after peer=" + peer.Name);
         }
-
-        private void BroadcastWorld(INetMessage message)
-        {
-            if (message is not WorldStateMessage worldMessage)
-            {
-
-                throw new InvalidOperationException("World host can only broadcast WorldStateMessage values.");
-            }
-
-
-            RuntimeContext.Broadcast(worldMessage);
-        }
-
-        private void SendWorldTo(int connectionId, INetMessage message)
-        {
-            if (message is not WorldStateMessage worldMessage)
-            {
-
-                throw new InvalidOperationException("World host can only send WorldStateMessage values.");
-            }
-
-
-            RuntimeContext.Send(connectionId, worldMessage);
-        }
-
-        private void RelayWorldExcept(int excludedConnectionId, INetMessage message)
-        {
-            if (message is not WorldStateMessage worldMessage)
-            {
-
-                throw new InvalidOperationException("World host can only relay WorldStateMessage values.");
-            }
-
-            // Relay through the transport's broadcast admission so a peer that is still joining
-            // is skipped rather than treated as a hard send failure.
-
-            RuntimeContext.Relay(excludedConnectionId, worldMessage);
-        }
-
     }
 }

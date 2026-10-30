@@ -30,6 +30,8 @@ namespace CardShopCoop.Modules.Staff
         private bool _shutdown;
         private bool _initialized;
         private Guid _intentActionId;
+        private ICoopPeer _intentPeer;
+        private readonly List<StaffModuleDeltaMessage> _intentDeltas = new();
 
         /// <summary>How far a remote player may be from a worker to begin an interaction. Vanilla
         /// only opens the worker panel on a nearby click, so this generous bound rejects a
@@ -67,7 +69,7 @@ namespace CardShopCoop.Modules.Staff
             if (connection != null && IsJoinPhase(connection.State) && RuntimeContext.InGame()
                 && GetWorkerManager()?.m_WorkerDataList != null)
             {
-                RuntimeContext.Send(connection.Id, BuildBaseline());
+                PeerHandle.ForConnection(connection)?.Send(BuildBaseline());
             }
         }
 
@@ -93,6 +95,8 @@ namespace CardShopCoop.Modules.Staff
 
             var peerId = context.Connection.Id;
             _intentActionId = message.ActionId;
+            _intentPeer = message.Peer;
+            _intentDeltas.Clear();
             var accepted = false;
             try
             {
@@ -126,9 +130,13 @@ namespace CardShopCoop.Modules.Staff
                 _intentActionId = Guid.Empty;
             }
 
+            var response = new StaffIntentResponse { Deltas = new List<StaffModuleDeltaMessage>(_intentDeltas) };
+            _intentDeltas.Clear();
+            _intentPeer = null;
             return accepted
-                ? ActionOutcome.Applied()
-                : ActionOutcome.Reject("staff intent " + message.Kind + " was refused by the host");
+                ? ActionOutcome.Applied(response)
+                : ActionOutcome.Reject("staff intent " + message.Kind + " was refused by the host",
+                    response);
         }
 
         private bool IsValidSender(MessageContext context, StaffModuleIntentMessage message)
@@ -520,7 +528,6 @@ namespace CardShopCoop.Modules.Staff
 
             var message = new StaffModuleDeltaMessage
             {
-                ActionId = _intentActionId,
                 Kind = StaffDeltaKind.Interaction,
                 Worker = worker,
                 Generation = EnsureGeneration(worker),
@@ -533,20 +540,25 @@ namespace CardShopCoop.Modules.Staff
             // holds a lease) that belongs to another player.
             if (grantedPeer > 0 && occupied)
             {
-                RuntimeContext.Send(grantedPeer, message);
-                RuntimeContext.Relay(grantedPeer, new StaffModuleDeltaMessage
+                if (_intentActionId != Guid.Empty && _intentPeer != null)
                 {
-                    ActionId = message.ActionId,
-                    Kind = message.Kind,
-                    Worker = message.Worker,
-                    Generation = message.Generation,
-                    Granted = false,
-                    Occupied = true,
-                });
+                    _intentDeltas.Add(message);
+                    Context.BroadcastExcept(_intentPeer, new StaffModuleDeltaMessage
+                    {
+                        Kind = message.Kind,
+                        Worker = message.Worker,
+                        Generation = message.Generation,
+                        Granted = false,
+                        Occupied = true,
+                    });
+                    return;
+                }
+
+                Context.Broadcast(message);
                 return;
             }
 
-            RuntimeContext.Broadcast(message);
+            Broadcast(message);
         }
 
         private void PublishWorkerBootstrap(Worker worker)
@@ -562,7 +574,6 @@ namespace CardShopCoop.Modules.Staff
                 StaffModuleInterop.CaptureEntry(manager, worker.m_WorkerIndex));
             Broadcast(new StaffModuleDeltaMessage
             {
-                ActionId = _intentActionId,
                 Kind = entry.Hired ? StaffDeltaKind.Hired : StaffDeltaKind.Fired,
                 Worker = worker,
                 Generation = entry.Generation,
@@ -581,7 +592,6 @@ namespace CardShopCoop.Modules.Staff
             var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
             Broadcast(new StaffModuleDeltaMessage
             {
-                ActionId = _intentActionId,
                 Kind = StaffDeltaKind.Task,
                 Worker = worker,
                 Generation = EnsureGeneration(worker),
@@ -603,7 +613,6 @@ namespace CardShopCoop.Modules.Staff
             var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
             Broadcast(new StaffModuleDeltaMessage
             {
-                ActionId = _intentActionId,
                 Kind = StaffDeltaKind.Options,
                 Worker = worker,
                 Generation = EnsureGeneration(worker),
@@ -629,7 +638,6 @@ namespace CardShopCoop.Modules.Staff
                 var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Pack,
                     Worker = worker,
                     Generation = EnsureGeneration(worker),
@@ -672,7 +680,6 @@ namespace CardShopCoop.Modules.Staff
             {
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Bonus,
                     Worker = worker,
                     Generation = EnsureGeneration(worker),
@@ -695,7 +702,6 @@ namespace CardShopCoop.Modules.Staff
 
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Experience,
                     Worker = worker,
                     Generation = EnsureGeneration(worker),
@@ -712,7 +718,6 @@ namespace CardShopCoop.Modules.Staff
             {
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Fired,
                     Worker = worker,
                     Generation = EnsureGeneration(worker),
@@ -729,7 +734,17 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
-            RuntimeContext.Broadcast(message);
+            if (_intentActionId != Guid.Empty)
+            {
+                _intentDeltas.Add(message);
+                if (_intentPeer != null)
+                {
+                    Context.BroadcastExcept(_intentPeer, message);
+                }
+                return;
+            }
+
+            Context.Broadcast(message);
         }
 
         private static bool TryGetFinite(float value, out float result)

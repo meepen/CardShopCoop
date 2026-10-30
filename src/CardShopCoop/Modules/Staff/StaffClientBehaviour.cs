@@ -1,12 +1,13 @@
 using System;
+using CardShopCoop.Api;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using CardShopCoop.Util;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
@@ -17,7 +18,6 @@ namespace CardShopCoop.Modules.Staff
     [ClientBehaviour]
     public sealed class StaffClientBehaviour : CoopBehaviour
     {
-        private const string PredictionScope = "staff";
         private static StaffClientBehaviour _active;
         private static bool _applyingRemote;
         private static bool _allowWorkerOpen;
@@ -40,18 +40,21 @@ namespace CardShopCoop.Modules.Staff
 
         /// <summary>Pre-action state carried from a converted capture-only prefix to its observe
         /// postfix. Null means the action was not observable and must not be predicted.</summary>
-        private sealed class StaffAction
+        internal sealed class StaffAction
         {
             /// <summary>The live worker the action targets. Null for a hire, which addresses the
             /// save-data slot in <see cref="Index"/> instead of a live entity.</summary>
             public Worker Worker;
-            /// <summary>Local prediction/correlation key, never a wire field.</summary>
+            /// <summary>The save-data slot for a hire; otherwise the live worker's index.</summary>
             public int Index;
             public StaffModuleEntry Before;
             public StaffModuleIntentMessage Message;
             // The wallet amount vanilla debits for a hire/bonus, captured before the game spends
             // it so a rejected prediction can refund exactly that amount.
             public double Spend;
+
+            /// <summary>Reverses the optimistic local change. Local-only.</summary>
+            public Action Undo;
         }
 
         private sealed class InteractScreenCache : Cached<WorkerInteractUIScreen>
@@ -115,19 +118,12 @@ namespace CardShopCoop.Modules.Staff
             if (message == null || message.Worker == null)
             {
                 CoopPlugin.Log.LogWarning("[staff] client dropped delta with no live worker.");
-                ActionLedger.Ack(message?.ActionId ?? Guid.Empty);
                 return;
             }
 
             if (!ApplyDelta(message))
             {
                 var key = DeltaKey(message);
-                if (_deferredDeltas.TryGetValue(key, out var previous))
-                {
-                    ActionLedger.Ack(previous.ActionId);
-                }
-
-
                 _deferredDeltas[key] = message;
                 CoopPlugin.Log.LogInfo("[staff] deferred " + message.Kind + " worker="
                     + message.Worker.name + " generation=" + message.Generation + " known="
@@ -198,6 +194,10 @@ namespace CardShopCoop.Modules.Staff
                 return false;
             }
 
+            // Every delta carries host-computed state the optimistic run does not produce
+            // (_workerGenerations, the Hired bootstrap/manager entry, the interaction grant), so
+            // the action response always applies every delta it contains; a remote or host-local
+            // delta takes the same apply path.
             Action apply = () =>
             {
                 _applyingRemote = true;
@@ -211,24 +211,7 @@ namespace CardShopCoop.Modules.Staff
                 }
             };
 
-            // Fired and Interaction deltas only confirm the client's own optimistic action. The
-            // local apply already closed/opened the interaction (and released the lease/busy
-            // flags) exactly as the host did, so retiring the prediction without replaying it
-            // keeps the local interaction as-is.
-            if (message.Kind == StaffDeltaKind.Fired || message.Kind == StaffDeltaKind.Interaction)
-            {
-                ActionLedger.AckOrApply(message.ActionId, apply);
-            }
-            else
-            {
-                // Every other kind carries host-computed state the optimistic run does not
-                // produce: _workerGenerations (prediction snapshots leave Generation at 0, see
-                // ApplyEntry) and the Hired bootstrap/manager entry. AckOrApply retired the
-                // actor's own prediction and returned, losing that state, so Confirm retires it
-                // and still runs the authoritative apply.
-                ActionLedger.Confirm(message.ActionId, apply);
-            }
-
+            apply();
             return true;
         }
 
@@ -557,20 +540,48 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        /// <summary>Registers a post-hoc prediction for a game change this client just observed from
-        /// a hook postfix. The game already applied the mutation locally, so the prediction only
-        /// records how to replay and undo it and never re-runs it.</summary>
-        private void RegisterPostHoc(string key, StaffModuleIntentMessage message, Action apply,
-            Action undo)
+        /// <summary>Registers a prediction for a game change this client just observed from a hook
+        /// postfix. The game already applied the mutation locally, so the action only records how
+        /// to reverse it and settles against the host's response deltas.</summary>
+        private void RegisterPostHoc(StaffAction state, Action apply, Action undo)
         {
-            ActionLedger.Submit(key,
-                id =>
+            if (state?.Message == null)
+            {
+                return;
+            }
+
+            state.Undo = undo;
+            state.Message.Action = state;
+            Send(state.Message);
+        }
+
+        /// <summary>Reverses one refused staff action from the message's undo hook.</summary>
+        internal static void UndoAction(StaffAction state)
+            => state?.Undo?.Invoke();
+
+        /// <summary>Applies every authoritative delta the host returned for one staff action.</summary>
+        internal static void MergeAction(StaffAction state, ActionResponseMessage response)
+        {
+            var client = _active;
+            if (client == null || client._shutdown
+                || response is not StaffIntentResponse result)
+            {
+                return;
+            }
+
+            for (var i = 0; i < result.Deltas.Count; i++)
+            {
+                var delta = result.Deltas[i];
+                if (delta == null || delta.Worker == null)
                 {
-                    message.ActionId = id;
-                    Send(message);
-                },
-                apply,
-                undo);
+                    continue;
+                }
+
+                if (!client.ApplyDelta(delta))
+                {
+                    client._deferredDeltas[DeltaKey(delta)] = delta;
+                }
+            }
         }
 
         /// <summary>Re-applies the wallet debit of a replayed staff action through the game's own
@@ -601,7 +612,7 @@ namespace CardShopCoop.Modules.Staff
         private bool CanObserve()
             => !_shutdown && _joined && RuntimeContext.InGame()
                 && !_applyingRemote && _applyingPrediction == 0 && _insideStaffAction == 0
-                && !ActionLedger.IsReconciling;
+                && !ReentrancyGuard.Suppressed(this);
 
         /// <summary>Capture-only prefix for a local hire: snapshot the manager slot before vanilla
         /// OnPressHireButton spends the wallet and activates the worker. A hire addresses a
@@ -667,7 +678,7 @@ namespace CardShopCoop.Modules.Staff
             predicted.SecondaryTask = (byte)EWorkerTask.Rest;
             predicted.WorkerTask = (byte)EWorkerTask.Rest;
             predicted.CurrentState = (byte)EWorkerState.Idle;
-            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+            RegisterPostHoc(state,
                 () =>
                 {
                     // Replay re-hires through the module path, which does not spend, so mirror the
@@ -733,7 +744,7 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
-            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(() =>
                 {
                     // GiveSalaryBonus does not spend; mirror the wallet debit the host owns.
@@ -790,7 +801,7 @@ namespace CardShopCoop.Modules.Staff
             _insideStaffAction--;
             var worker = state.Worker;
             var index = worker.m_WorkerIndex;
-            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(() =>
                 {
                     // The host ends the interaction as part of firing (HostFire ->
@@ -854,7 +865,7 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(() => screen.SetTaskAsPrimaryOrSecondary(isPrimary)),
                 () => Restore(state.Before, worker));
             ReleaseLocalInteraction(worker);
@@ -932,7 +943,7 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(() => screen.OnPressRestockShelfWithNoLabel(noLabel)),
                 () => Restore(state.Before, worker));
             ReleaseLocalInteraction(worker);
@@ -1000,7 +1011,7 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(screen.OnPressConfirm),
                 () => Restore(state.Before, worker));
             ReleaseLocalInteraction(worker);
@@ -1069,7 +1080,7 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(screen.OnPressConfirm),
                 () => Restore(state.Before, worker));
             ReleaseLocalInteraction(worker);
@@ -1119,7 +1130,7 @@ namespace CardShopCoop.Modules.Staff
             var worker = state.Worker;
             _workerBusy[worker] = true;
             _workerLease.Add(worker);
-            RegisterPostHoc(PredictionScope + ":" + state.Index, state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(() =>
                 {
                     _workerBusy[worker] = true;
@@ -1167,7 +1178,7 @@ namespace CardShopCoop.Modules.Staff
             var worker = state.Worker;
             _workerLease.Remove(worker);
             _workerBusy[worker] = false;
-            RegisterPostHoc(PredictionScope + ":" + state.Index, state.Message,
+            RegisterPostHoc(state,
                 () => WithPrediction(() =>
                 {
                     _workerLease.Remove(worker);
@@ -1199,7 +1210,7 @@ namespace CardShopCoop.Modules.Staff
                 throw new InvalidOperationException("Cannot send a Staff intent outside the game.");
             }
 
-            RuntimeContext.Send(1, message);
+            Context.Send(message);
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
@@ -1262,12 +1273,6 @@ namespace CardShopCoop.Modules.Staff
 
         private void ClearDeferredDeltas()
         {
-            foreach (var delta in _deferredDeltas.Values)
-            {
-                ActionLedger.Ack(delta.ActionId);
-            }
-
-
             _deferredDeltas.Clear();
         }
 

@@ -37,11 +37,11 @@ namespace CardShopCoop.CustomTv
         }
 
         [OnFullyJoined]
-        private void MarkJoined(PeerConnection _) => ApplyStoredStates();
+        private void MarkJoined(ICoopPeer _) => ApplyStoredStates();
 
         private bool Joined
             => Context != null
-                && Context.HostConnection?.State == ConnectionState.FullyJoined;
+                && Context.Host?.State == ConnectionState.FullyJoined;
 
         [ExtendedInformationHandler]
         private void OnTvState(InteractableObject tv, InformationChange<TvState> change)
@@ -127,9 +127,10 @@ namespace CardShopCoop.CustomTv
         }
 
         [OnClientDisconnected]
-        private void ForgetHost(PeerConnection connection, DisconnectInfo info)
+        private void ForgetHost(ICoopPeer peer, DisconnectInfo info)
         {
-            if (connection?.Id == 1)
+            // A client can only reach the host, so any peer that disconnects is the host.
+            if (peer == null || peer.IsHost)
             {
                 ResetSessionState();
             }
@@ -370,7 +371,7 @@ namespace CardShopCoop.CustomTv
             message.Tv = tv;
             message.Previous = previous;
             message.UndoSeek = undoSeek;
-            _active.Context.Send(_active.Context.HostConnection, message);
+            _active.Context.Send(message);
         }
 
         /// <summary>Captures the pending URL before the game clears it, so the Open the quality
@@ -548,7 +549,7 @@ namespace CardShopCoop.CustomTv
         }
 
         /// <summary>Captures the playback state before a control the game performs itself, so the
-        /// postfix can register one observed action and replay it if the host rejects it.</summary>
+        /// postfix can send one observed action and reverse it if the host rejects it.</summary>
         private static void CapturePrefix(object __instance, out PlaybackUndoState __state)
         {
             var controller = __instance as Component;

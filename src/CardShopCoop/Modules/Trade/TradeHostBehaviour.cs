@@ -156,7 +156,7 @@ namespace CardShopCoop.Modules.Trade
                     // longer owns it, instead of leaving them on a stale owner until the next trade
                     // delta. This is the same kept-offer shape every other host-local offer update
                     // uses, so the contents are unchanged and the host stays the single writer.
-                    SendOfferDelta(offer, removed: false, Guid.Empty, TradeOutcome.None, 0);
+                    SendOfferDelta(offer, removed: false, TradeOutcome.None, 0);
                 }
             }
         }
@@ -175,7 +175,10 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            RuntimeContext.Send(connectionId, BuildBaseline());
+            // Join catch-up is deliberately one-shot. The normal event hooks below publish
+            // later authoritative changes; a failed send is not turned into a retry queue.
+            var peer = PeerHandle.ForConnection(connection);
+            peer?.Send(BuildBaseline());
         }
 
         private void SendBaselinesToJoined()
@@ -189,7 +192,7 @@ namespace CardShopCoop.Modules.Trade
             {
                 if (pair.Value != null && IsJoinPhase(pair.Value.State))
                 {
-                    RuntimeContext.Send(pair.Key, BuildBaseline());
+                    PeerHandle.ForConnection(pair.Value)?.Send(BuildBaseline());
                 }
             }
         }
@@ -283,16 +286,14 @@ namespace CardShopCoop.Modules.Trade
             CoopPlugin.Log.LogInfo("[trade] host accepted open counter=" + offer.Counter.name
                 + " customer=" + offer.Customer.name + " gen=" + offer.CustomerGeneration
                 + " nonce=" + offer.Nonce + " owner=" + connectionId + ".");
-            RuntimeContext.Send(connectionId, new TradeSessionMessage
+            return ActionOutcome.Applied(new TradeSessionResponse
             {
-                ActionId = message.ActionId,
                 Counter = offer.Counter,
                 Customer = offer.Customer,
                 CustomerGeneration = offer.CustomerGeneration,
                 OfferNonce = offer.Nonce,
                 Accepted = true,
             });
-            return ActionOutcome.Applied();
         }
 
         private ActionOutcome ResolveAccept(int connectionId, TradeIntentMessage message, Offer offer)
@@ -321,17 +322,15 @@ namespace CardShopCoop.Modules.Trade
                     }
 
                     RemoveOffer(offer);
-                    SendOfferDelta(offer, removed: true, message.ActionId, message.Result,
-                        connectionId);
+                    SendOfferDelta(offer, removed: true, message.Result, connectionId);
                     FinishCustomerReservation(offer);
-                    return ActionOutcome.Applied();
+                    return ActionOutcome.Applied(BuildOfferResponse(offer, true, message.Result));
                 case TradeOutcome.WalkedAway:
                     // The declines ran out, so vanilla minted/took nothing; only the offer ends.
                     RemoveOffer(offer);
-                    SendOfferDelta(offer, removed: true, message.ActionId, message.Result,
-                        connectionId);
+                    SendOfferDelta(offer, removed: true, message.Result, connectionId);
                     FinishCustomerReservation(offer);
-                    return ActionOutcome.Applied();
+                    return ActionOutcome.Applied(BuildOfferResponse(offer, true, message.Result));
                 case TradeOutcome.Haggle:
                 case TradeOutcome.Refused:
                     {
@@ -344,9 +343,9 @@ namespace CardShopCoop.Modules.Trade
                         var updated = TradeInterop.DataFromState(message.ResultState);
                         TradeInterop.SetStoredData(offer.Customer, updated);
                         offer.Data = updated;
-                        SendOfferDelta(offer, removed: false, message.ActionId, message.Result,
-                            connectionId);
-                        return ActionOutcome.Applied();
+                        SendOfferDelta(offer, removed: false, message.Result, connectionId);
+                        return ActionOutcome.Applied(
+                            BuildOfferResponse(offer, false, message.Result));
                     }
                 default:
                     return Reject(connectionId, message,
@@ -453,10 +452,10 @@ namespace CardShopCoop.Modules.Trade
         private ActionOutcome ResolveDecline(int connectionId, TradeIntentMessage message, Offer offer)
         {
             RemoveOffer(offer);
-            SendOfferDelta(offer, removed: true, message.ActionId, TradeOutcome.Declined,
-                connectionId);
+            SendOfferDelta(offer, removed: true, TradeOutcome.Declined, connectionId);
             FinishCustomerReservation(offer);
-            return ActionOutcome.Applied();
+            return ActionOutcome.Applied(
+                BuildOfferResponse(offer, true, TradeOutcome.Declined));
         }
 
         private ActionOutcome ResolveThink(int connectionId, TradeIntentMessage message, Offer offer)
@@ -496,10 +495,9 @@ namespace CardShopCoop.Modules.Trade
             }
 
             offer.Data = TradeInterop.CopyData(stored);
-            SendOfferDelta(offer, removed: false, message.ActionId, TradeOutcome.Thinking,
-                connectionId);
+            SendOfferDelta(offer, removed: false, TradeOutcome.Thinking, connectionId);
             offer.Owner = 0;
-            return ActionOutcome.Applied();
+            return ActionOutcome.Applied(BuildOfferResponse(offer, false, TradeOutcome.Thinking));
         }
 
         private bool ValidateLiveAction(int connectionId, Offer offer, out string reason)
@@ -685,7 +683,7 @@ namespace CardShopCoop.Modules.Trade
                 + " customer=" + customer.name + " gen=" + generation + " nonce=" + _nextNonce
                 + " ask=" + data.m_SellCardAskPrice.ToString("F2") + " priceSet="
                 + data.m_PriceSet.ToString("F2") + " trading=" + data.m_IsTrading + ".");
-            SendOfferDelta(_offers[counter], removed: false, Guid.Empty, TradeOutcome.None, 0);
+            SendOfferDelta(_offers[counter], removed: false, TradeOutcome.None, 0);
         }
 
         private void RefreshStoredData(Offer offer)
@@ -703,7 +701,7 @@ namespace CardShopCoop.Modules.Trade
                     + " trading=" + (offer.Data == null ? "n/a" : offer.Data.m_IsTrading.ToString())
                     + ").");
                 offer.Data = TradeInterop.CopyData(stored);
-                SendOfferDelta(offer, removed: false, Guid.Empty, TradeOutcome.None, 0);
+                SendOfferDelta(offer, removed: false, TradeOutcome.None, 0);
             }
         }
 
@@ -715,7 +713,7 @@ namespace CardShopCoop.Modules.Trade
             for (var i = 0; i < offers.Count; i++)
             {
                 var offer = offers[i];
-                SendOfferDelta(offer, removed: true, Guid.Empty, TradeOutcome.Expired, 0);
+                SendOfferDelta(offer, removed: true, TradeOutcome.Expired, 0);
                 offer.Owner = 0;
                 FinishCustomerReservation(offer);
             }
@@ -729,7 +727,7 @@ namespace CardShopCoop.Modules.Trade
             }
 
             RemoveOffer(offer);
-            SendOfferDelta(offer, removed: true, Guid.Empty, TradeOutcome.Expired, 0);
+            SendOfferDelta(offer, removed: true, TradeOutcome.Expired, 0);
             FinishCustomerReservation(offer);
         }
 
@@ -801,10 +799,23 @@ namespace CardShopCoop.Modules.Trade
                 + connectionId + " counter="
                 + (message.Counter == null ? "null" : message.Counter.name) + " id="
                 + message.ActionId + " nonce=" + message.OfferNonce + ": " + reason + ".");
-            return ActionOutcome.Reject(reason);
+            var live = message.Counter != null
+                && _offers.TryGetValue(message.Counter, out var offer) ? offer : null;
+            return ActionOutcome.Reject(reason,
+                BuildOfferResponse(live, live == null, TradeOutcome.None));
         }
 
-        private void SendOfferDelta(Offer offer, bool removed, Guid actionId,
+        private TradeOfferResponse BuildOfferResponse(Offer offer, bool removed,
+            TradeOutcome outcome)
+            => new()
+            {
+                Counter = offer?.Counter,
+                Outcome = outcome,
+                Removed = removed,
+                Offer = removed || offer == null ? null : ToState(offer),
+            };
+
+        private void SendOfferDelta(Offer offer, bool removed,
             TradeOutcome outcome, int predictionPeer)
         {
             if (_shutdown || !RuntimeContext.InGame() || offer == null)
@@ -818,19 +829,19 @@ namespace CardShopCoop.Modules.Trade
                 + (offer.Data == null ? "n/a" : offer.Data.m_SellCardAskPrice.ToString("F2"))
                 + " priceSet="
                 + (offer.Data == null ? "n/a" : offer.Data.m_PriceSet.ToString("F2"))
-                + " pred=" + actionId + " peers=" + _joinedConnections.Count + ".");
+                + " peers=" + _joinedConnections.Count + ".");
 
             var state = removed ? null : ToState(offer);
             foreach (var pair in _joinedConnections)
             {
-                if (pair.Value == null || !IsJoinPhase(pair.Value.State))
+                if (pair.Key == predictionPeer || pair.Value == null
+                    || !IsJoinPhase(pair.Value.State))
                 {
                     continue;
                 }
 
-                RuntimeContext.Send(pair.Key, new TradeOfferDeltaMessage
+                PeerHandle.ForConnection(pair.Value)?.Send(new TradeOfferDeltaMessage
                 {
-                    ActionId = pair.Key == predictionPeer ? actionId : Guid.Empty,
                     Counter = offer.Counter,
                     Outcome = outcome,
                     Removed = removed,

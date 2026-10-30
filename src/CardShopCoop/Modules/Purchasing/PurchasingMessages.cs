@@ -13,90 +13,41 @@ namespace CardShopCoop.Modules.Purchasing
         ScannerLicense = 3,
     }
 
+    /// <summary>A predicted checkout. The client already ran the vanilla checkout; a host refusal
+    /// reverses that local prediction and the host's answer settles it.</summary>
+    public abstract class PurchaseIntent : ActionMessage
+    {
+        public override void OnUndo(ActionResponseMessage response)
+            => PurchasingClientBehaviour.RejectSubmission(ActionId);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => PurchasingClientBehaviour.AcceptSubmission(ActionId, response);
+    }
+
     /// <summary>A restock cart checkout, from the vanilla restock screen or the scanner.</summary>
     [NetworkMessage]
-    public sealed class RestockPurchaseIntent : ActionMessage
+    public sealed class RestockPurchaseIntent : PurchaseIntent
     {
-
         public bool ScannerCheckout;
         public List<PurchaseLine> Lines = new();
-
-        /// <summary>The host's answer, produced by <see cref="OnApply"/> and published by the
-        /// module's handler. Not serialized.</summary>
-        [NonSerialized]
-        public PurchaseOutcomeMessage Result;
-
-        public override void OnApply()
-            => Result = PurchasingHostBehaviour.Active?.ApplyRestockPurchase(this);
-
-        /// <summary>The client registers its own checkout undo closure with the ledger, so the
-        /// message itself never reverses a prediction.</summary>
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
     }
 
     [NetworkMessage]
-    public sealed class FurniturePurchaseIntent : ActionMessage
+    public sealed class FurniturePurchaseIntent : PurchaseIntent
     {
-
         public List<PurchaseLine> Lines = new();
-
-        /// <summary>The host's answer, produced by <see cref="OnApply"/> and published by the
-        /// module's handler. Not serialized.</summary>
-        [NonSerialized]
-        public PurchaseOutcomeMessage Result;
-
-        public override void OnApply()
-            => Result = PurchasingHostBehaviour.Active?.ApplyFurniturePurchase(this);
-
-        /// <summary>The client registers its own checkout undo closure with the ledger, so the
-        /// message itself never reverses a prediction.</summary>
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
     }
 
     [NetworkMessage]
-    public sealed class ProductLicensePurchaseIntent : ActionMessage
+    public sealed class ProductLicensePurchaseIntent : PurchaseIntent
     {
-
         public List<PurchaseLine> Lines = new();
-
-        /// <summary>The host's answer, produced by <see cref="OnApply"/> and published by the
-        /// module's handler. Not serialized.</summary>
-        [NonSerialized]
-        public PurchaseOutcomeMessage Result;
-
-        public override void OnApply()
-            => Result = PurchasingHostBehaviour.Active?.ApplyProductLicensePurchase(this);
-
-        /// <summary>The client registers its own checkout undo closure with the ledger, so the
-        /// message itself never reverses a prediction.</summary>
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
     }
 
     [NetworkMessage]
-    public sealed class ScannerLicensePurchaseIntent : ActionMessage
+    public sealed class ScannerLicensePurchaseIntent : PurchaseIntent
     {
-
         public List<PurchaseLine> Lines = new();
-
-        /// <summary>The host's answer, produced by <see cref="OnApply"/> and published by the
-        /// module's handler. Not serialized.</summary>
-        [NonSerialized]
-        public PurchaseOutcomeMessage Result;
-
-        public override void OnApply()
-            => Result = PurchasingHostBehaviour.Active?.ApplyScannerLicensePurchase(this);
-
-        /// <summary>The client registers its own checkout undo closure with the ledger, so the
-        /// message itself never reverses a prediction.</summary>
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
     }
 
     public sealed class PurchaseLine
@@ -117,14 +68,11 @@ namespace CardShopCoop.Modules.Purchasing
         public List<Guid> BoxNetworkIds = new();
     }
 
-    /// <summary>The host's answer to one accepted purchase intent. A rejection is the framework's
-    /// generic rollback, so this message is only ever sent for an accepted checkout.</summary>
+    /// <summary>The host's answer to one purchase intent: the accepted checkout's result, or a
+    /// rejection carrying the same actor-only result so the client can settle its prediction.</summary>
     [NetworkMessage]
-    public sealed class PurchaseOutcomeMessage : INetMessage
+    public sealed class PurchaseOutcomeMessage : ActionResponseMessage
     {
-        /// <summary>The purchase intent this outcome answers.</summary>
-        public Guid ActionId;
-
         public PurchaseKind Kind;
         public bool Success;
         public string Text = "";

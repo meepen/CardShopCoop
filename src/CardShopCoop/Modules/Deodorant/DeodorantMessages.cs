@@ -13,23 +13,46 @@ namespace CardShopCoop.Modules.Deodorant
         public Vector3 Position;
         public float Content;
 
-        // The client registers this prediction through the explicit Apply/Undo closures in
-        // DeodorantClientBehaviour, and the host handler performs the spray itself, so the action
-        // hooks are never the applied path.
-        public override void OnApply()
-        {
-        }
+        /// <summary>The local spray content before this tick. Restored when the host rejects the
+        /// spray so the prediction is reversed through the game's own surface.</summary>
+        [NonSerialized]
+        public InteractionPlayerController Controller;
+
+        [NonSerialized]
+        public float Before;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            DeodorantState.TrySetContent(Controller, Before);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            // Shared customers are host-computed; the response carries the host's post-spray
+            // state for the acting client. Other peers get the event broadcast.
+            if (response is HandheldSprayResponseMessage result)
+            {
+                DeodorantState.ApplySprayTick(Controller, result.Content, result.Customers);
+            }
+
+            Controller = null;
+            Before = 0f;
         }
     }
 
+    /// <summary>The acting client's post-spray state: the spray content and every customer the
+    /// host's spray changed. Other peers receive <see cref="HandheldSprayEventMessage"/>.</summary>
+    [NetworkMessage]
+    public sealed class HandheldSprayResponseMessage : ActionResponseMessage
+    {
+        public float Content;
+        public List<DeodorantCustomerState> Customers = new();
+    }
+
+    /// <summary>One host-computed spray result for peers other than the acting client.</summary>
     [NetworkMessage]
     public sealed class HandheldSprayEventMessage : INetMessage
     {
-        /// <summary>The prediction this event answers, or empty for a host-local spray.</summary>
-        public Guid ActionId;
         public Vector3 Position;
         public float Content;
         public List<DeodorantCustomerState> Customers = new();

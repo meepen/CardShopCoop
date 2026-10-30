@@ -26,9 +26,9 @@ namespace CardShopCoop.Runtime
         {
         }
 
-        /// <summary>Host: send this module's COMPLETE state to one connection - the join
-        /// catch-up / explicit re-baseline path. Never called periodically.</summary>
-        public virtual void FullUpdate(PeerConnection connection)
+        /// <summary>Host: send this module's COMPLETE state to one peer - the join catch-up /
+        /// explicit re-baseline path. Never called periodically.</summary>
+        internal virtual void FullUpdate(PeerConnection connection)
         {
         }
 

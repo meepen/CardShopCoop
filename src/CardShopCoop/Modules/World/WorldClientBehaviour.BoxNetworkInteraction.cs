@@ -22,6 +22,15 @@ namespace CardShopCoop.Modules.World
             _boxNetworkInteraction?.ClientApplyBoxState(message);
         }
 
+        /// <summary>Client: applies the host's absolute contents/open state carried by a box-state
+        /// action's response. Called from the action's <c>OnMerge</c> on accept and after the undo
+        /// on reject, so a refused local mutation converges on the host instead of inverting an
+        /// older local snapshot.</summary>
+        internal static bool MergeBoxStateResult(BoxStateResult result)
+            => result?.Box != null
+                && MergeBoxStateResult(result.Box, result.ItemType, result.ItemCount,
+                    result.IsBoxOpened);
+
         [MessageHandler]
         private void HandleWorldBaselineStart(MessageContext context, WorldBaselineStartMessage message)
         {

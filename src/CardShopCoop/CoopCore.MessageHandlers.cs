@@ -49,7 +49,7 @@ namespace CardShopCoop
                 CoopPlugin.Log.LogError("Feature FullyJoined callbacks failed: " + error);
             }
 
-            Send(context.ConnectionId, new FullyJoinedAckMessage());
+            SendMessage(context.Peer, new FullyJoinedAckMessage());
             if (!context.Connection.TryTransition(ConnectionState.FullyJoined))
             {
                 CoopPlugin.Log.LogWarning("Could not complete FullyJoined transition for connection "

@@ -1,11 +1,12 @@
 using System;
+using CardShopCoop.Api;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using CardShopCoop.Util;
 using HarmonyLib;
 
@@ -22,7 +23,6 @@ namespace CardShopCoop.Modules.Grading
 
         private static GradingClientBehaviour _active;
         private readonly Dictionary<GradeCardSubmitSet, Guid> _jobIds = new();
-        private readonly Dictionary<Guid, GradeCardSubmitSet> _localJobSets = new();
         private GradingStateMessage _pendingState;
         private readonly Dictionary<Guid, GradingJobDeltaMessage> _pendingDeltas = new();
         private bool _contentReady;
@@ -44,16 +44,11 @@ namespace CardShopCoop.Modules.Grading
             try
             {
                 _active = this;
-                // A rejected prediction leaves its locally minted job behind until the next
-                // authoritative state; retiring the prediction must also drop the job binding so a
-                // later delta cannot adopt a job the host never accepted.
-                ActionLedger.ActionSettled += RetireLocalJob;
                 GradingPatches.ApplyClient(Harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }
             catch
             {
-                ActionLedger.ActionSettled -= RetireLocalJob;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
 
                 if (ReferenceEquals(_active, this))
@@ -72,12 +67,6 @@ namespace CardShopCoop.Modules.Grading
             _contentReady = true;
             ApplyPending();
         }
-
-        /// <summary>Drops the local-job binding for a prediction that left the tracker (accepted
-        /// and bound, or rejected and removed). Prevents a stale binding from adopting a later
-        /// authoritative delta onto a job the host never accepted.</summary>
-        private void RetireLocalJob(Guid actionId)
-            => _localJobSets.Remove(actionId);
 
         [MessageHandler]
         private void HandleState(MessageContext context, GradingStateMessage message)
@@ -185,65 +174,105 @@ namespace CardShopCoop.Modules.Grading
 
             var spent = state.SupplyCostBefore
                 - CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
-            ActionLedger.Submit(
-                "grading",
-                actionId =>
+            // Bind the local job to its stable id before sending. The host adopts this same id, so
+            // the accepted delta finds the job by id rather than appending a duplicate.
+            var message = new GradingOpMessage
+            {
+                JobId = state.JobId,
+                ServiceLevel = (byte)state.ServiceLevel,
+                CompanyId = (byte)GradingInterop.CurrentCompanyId,
+                Cards = state.Cards,
+                Prediction = new SubmissionPrediction(this, jobSet, state.Previous,
+                    state.ServiceLevel, state.Cap, state.Screen, spent),
+            };
+            _jobIds[jobSet] = state.JobId;
+            try
+            {
+                Context.Send(message);
+            }
+            catch
+            {
+                _jobIds.Remove(jobSet);
+                throw;
+            }
+        }
+
+        /// <summary>One predicted grading submission. The vanilla call already minted, reserved
+        /// and charged the job; the prediction owns the local object until the host answers.</summary>
+        internal sealed class SubmissionPrediction
+        {
+            private readonly GradingClientBehaviour _client;
+            private readonly GradeCardSubmitSet _jobSet;
+            private readonly GradeCardSubmitSet _previous;
+            private readonly int _serviceLevel;
+            private readonly int _cap;
+            private readonly GradedCardSubmitSelectScreen _screen;
+            private readonly float _spent;
+
+            internal SubmissionPrediction(GradingClientBehaviour client, GradeCardSubmitSet jobSet,
+                GradeCardSubmitSet previous, int serviceLevel, int cap,
+                GradedCardSubmitSelectScreen screen, float spent)
+            {
+                _client = client;
+                _jobSet = jobSet;
+                _previous = previous;
+                _serviceLevel = serviceLevel;
+                _cap = cap;
+                _screen = screen;
+                _spent = spent;
+            }
+
+            public void Undo()
+                => _client.UndoSubmission(_jobSet, _previous, _serviceLevel, _cap, _screen, _spent);
+
+            public void Merge(ActionResponseMessage response)
+                => _client.MergeSubmission(_jobSet, response);
+        }
+
+        /// <summary>Reverses a refused submission: removes the locally minted job, restores the
+        /// player's selection, refunds the mirrored fee and reopens the submit screen.</summary>
+        private void UndoSubmission(GradeCardSubmitSet jobSet, GradeCardSubmitSet previous,
+            int serviceLevel, int cap, GradedCardSubmitSelectScreen screen, float spent)
+        {
+            RemoveLocalJob(jobSet);
+            CPlayerData.m_CurrentGradeCardSubmitSet = previous;
+            if (spent > 0.0001f)
+            {
+                CEventManager.QueueEvent(new CEventPlayer_AddCoin(spent, true));
+            }
+
+            RefreshWebsite();
+            ReopenSubmissionScreen(screen);
+        }
+
+        /// <summary>Settles a resolved submission against the host's answer: the accepted job id
+        /// binds the surviving local job, or the rejected job list replaces authority.</summary>
+        private void MergeSubmission(GradeCardSubmitSet jobSet, ActionResponseMessage response)
+        {
+            if (response is not GradingIntentResponse result)
+            {
+                return;
+            }
+
+            if (result.Delta != null)
+            {
+                if (jobSet != null)
                 {
-                    // Bind the local job to the prediction and its stable id before sending. The
-                    // host adopts this same id, so the accepted delta finds the job by id rather
-                    // than appending a duplicate.
-                    _localJobSets[actionId] = jobSet;
-                    _jobIds[jobSet] = state.JobId;
-                    try
-                    {
-                        RuntimeContext.Send(1, new GradingOpMessage
-                        {
-                            ActionId = actionId,
-                            JobId = state.JobId,
-                            ServiceLevel = (byte)state.ServiceLevel,
-                            CompanyId = (byte)GradingInterop.CurrentCompanyId,
-                            Cards = state.Cards,
-                        });
-                    }
-                    catch
-                    {
-                        _localJobSets.Remove(actionId);
-                        _jobIds.Remove(jobSet);
-                        throw;
-                    }
-                },
-                () =>
-                {
-                    var jobs = CPlayerData.m_GradeCardInProgressList;
-                    // Undo removed the locally minted job; replay must put it back before the
-                    // authoritative delta for this prediction arrives to bind it to its host id.
-                    if (jobSet != null && jobs != null && !jobs.Contains(jobSet))
-                    {
-                        jobs.Add(jobSet);
-                    }
+                    _jobIds[jobSet] = result.Delta.Id;
+                }
 
+                // Vanilla already reset the selection and closed the screen; only drop the stale
+                // screen reference the rejection path would otherwise reopen.
+                _submitScreen = null;
+                RefreshWebsite();
+                return;
+            }
 
-                    ApplyLocalSubmission(state.ServiceLevel, state.Cap, state.Screen);
-                    if (spent > 0.0001f)
-                    {
-
-                        CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(spent));
-                    }
-
-                },
-                () =>
-                {
-                    RemoveLocalJob(jobSet);
-                    CPlayerData.m_CurrentGradeCardSubmitSet = state.Previous;
-                    if (spent > 0.0001f)
-                    {
-                        CEventManager.QueueEvent(new CEventPlayer_AddCoin(spent, true));
-                    }
-
-
-                    RefreshWebsite();
-                },
-                ReopenSubmissionScreen);
+            if (result.State != null)
+            {
+                _pendingState = result.State;
+                ApplyPending();
+            }
         }
 
         private void RemoveLocalJob(GradeCardSubmitSet set)
@@ -372,73 +401,43 @@ namespace CardShopCoop.Modules.Grading
 
         private bool ApplyDelta(GradingJobDeltaMessage message)
         {
-            // A submission we observed locally: the vanilla call already minted the job, so the
-            // authoritative delta only needs to bind that local job to the host id before the
-            // prediction retires. Applying it as a remote change would add a duplicate job.
-            if (message.ActionId != Guid.Empty
-                && _localJobSets.TryGetValue(message.ActionId, out var localSet))
+            var list = CPlayerData.m_GradeCardInProgressList
+                ?? new List<GradeCardSubmitSet>();
+            var index = FindSet(list, message.Id);
+            if (message.Removed)
             {
-                _localJobSets.Remove(message.ActionId);
-                if (localSet != null)
+                if (index >= 0)
                 {
-                    _jobIds[localSet] = message.Id;
+                    _jobIds.Remove(list[index]);
+                    list.RemoveAt(index);
                 }
-
-
-                ActionLedger.Ack(message.ActionId);
-                // Vanilla already reset the selection and closed the screen; only drop the stale
-                // screen reference the rejection path would otherwise reopen.
-                _submitScreen = null;
-                RefreshWebsite();
-                return true;
             }
-
-            ActionLedger.AckOrApply(message.ActionId, () =>
+            else
             {
-                var list = CPlayerData.m_GradeCardInProgressList
-                    ?? new List<GradeCardSubmitSet>();
-                var index = FindSet(list, message.Id);
-                if (message.Removed)
+                var replacement = ToGameSet(message);
+                if (index >= 0)
                 {
-                    if (index >= 0)
-                    {
-                        _jobIds.Remove(list[index]);
-                        list.RemoveAt(index);
-                    }
+                    _jobIds.Remove(list[index]);
+                    list[index] = replacement;
                 }
                 else
                 {
-                    var replacement = ToGameSet(message);
-                    if (index >= 0)
-                    {
-                        _jobIds.Remove(list[index]);
-                        list[index] = replacement;
-                    }
-                    else
-                    {
-                        list.Add(replacement);
-                    }
-
-
-                    _jobIds[replacement] = message.Id;
+                    list.Add(replacement);
                 }
-                CPlayerData.m_GradeCardInProgressList = list;
-                // This body only runs for a delta that is not ours (AckOrApply retired our own
-                // prediction in the branch above). Clearing the local submission selection and
-                // showing the "cards sent" status/SFX is the actor's own post-submit side effect;
-                // running it here would wipe a peer's in-progress selection for someone else's job.
-                RefreshWebsite();
-            });
+
+                _jobIds[replacement] = message.Id;
+            }
+            CPlayerData.m_GradeCardInProgressList = list;
+            // This body only runs for a delta that is not ours; the actor settles its own
+            // submission in the action merge. Clearing the local submission selection and showing
+            // the "cards sent" status/SFX is the actor's own post-submit side effect; running it
+            // here would wipe a peer's in-progress selection for someone else's job.
+            RefreshWebsite();
             return true;
         }
 
         private void DeferDelta(GradingJobDeltaMessage message)
         {
-            if (_pendingDeltas.TryGetValue(message.Id, out var previous))
-            {
-                _localJobSets.Remove(previous.ActionId);
-                ActionLedger.Ack(previous.ActionId);
-            }
             _pendingDeltas[message.Id] = message;
         }
 
@@ -455,30 +454,6 @@ namespace CardShopCoop.Modules.Grading
 
             }
             return -1;
-        }
-
-        /// <summary>Optimistic local half of a submission: clear the selection and close the
-        /// screen. <see cref="Submit"/> restores the selection and reopens the screen if the host
-        /// rejects the intent, so a refusal never strands the cards out of view.</summary>
-        private void ApplyLocalSubmission(int serviceLevel, int cap,
-            GradedCardSubmitSelectScreen screen)
-        {
-            var fresh = new GradeCardSubmitSet
-            {
-                m_ServiceLevel = serviceLevel,
-                m_CardDataList = new List<CardData>(cap),
-            };
-            for (var i = 0; i < cap; i++)
-            {
-                fresh.m_CardDataList.Add(new CardData());
-            }
-
-
-            CPlayerData.m_CurrentGradeCardSubmitSet = fresh;
-            screen?.CloseScreen();
-            RefreshWebsite();
-            SetStatus("cards sent for grading - they mature on the host's days", 4f);
-            SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
         }
 
         /// <summary>World reports that a predicted collection removal was rejected: the card is
@@ -558,9 +533,9 @@ namespace CardShopCoop.Modules.Grading
         /// submit screen, so restoring the selection is invisible unless the screen comes back.
         /// Prefer the website's own open path (keeps child registration correct) and fall back to
         /// the screen itself when no free job slot blocks the website path.</summary>
-        private void ReopenSubmissionScreen()
+        private void ReopenSubmissionScreen(GradedCardSubmitSelectScreen screen)
         {
-            var screen = _submitScreen;
+            screen ??= _submitScreen;
             if (screen == null || screen.IsScreenOpened())
             {
                 return;
@@ -671,71 +646,14 @@ namespace CardShopCoop.Modules.Grading
 
 
             _active._pendingState = null;
-            _active.RetainPendingLocalJobs();
-            _active.ResetPendingDeltas();
+            _active._pendingDeltas.Clear();
             _active._contentReady = false;
             _active._jobIds.Clear();
             _active._submitScreen = null;
         }
 
-        /// <summary>A data reload replaces or clears authoritative grading state, but a submission
-        /// still awaiting its host decision must keep its local-job binding. The accept delta is
-        /// matched by prediction id, not by object, so dropping the entry makes the accept retire
-        /// the prediction without binding and the next authoritative delta append the host job a
-        /// second time. Entries leave only when the prediction retires (accepted and bound, or
-        /// rejected), which <see cref="RetireLocalJob"/> and <see cref="ApplyDelta"/> already do.</summary>
-        private void RetainPendingLocalJobs()
-        {
-            var retired = new List<Guid>();
-            foreach (var pair in _localJobSets)
-            {
-                if (!ActionLedger.IsPending(pair.Key))
-                {
-                    retired.Add(pair.Key);
-                }
-            }
-            for (var i = 0; i < retired.Count; i++)
-            {
-                _localJobSets.Remove(retired[i]);
-            }
-
-        }
-
-        /// <summary>Drops deferred authoritative deltas on a reload, except the accept delta of a
-        /// submission still awaiting its host decision: keeping it lets <see cref="ApplyPending"/>
-        /// bind the surviving local job once the reloaded scene is ready instead of appending a
-        /// duplicate.</summary>
-        private void ResetPendingDeltas()
-        {
-            var kept = new List<KeyValuePair<Guid, GradingJobDeltaMessage>>();
-            foreach (var delta in _pendingDeltas)
-            {
-                if (delta.Value.ActionId != Guid.Empty
-                    && _localJobSets.ContainsKey(delta.Value.ActionId))
-                {
-                    kept.Add(delta);
-                }
-                else
-                {
-                    ActionLedger.Ack(delta.Value.ActionId);
-                }
-            }
-            _pendingDeltas.Clear();
-            for (var i = 0; i < kept.Count; i++)
-            {
-                _pendingDeltas[kept[i].Key] = kept[i].Value;
-            }
-
-        }
-
         private void ClearPendingDeltas()
         {
-            foreach (var delta in _pendingDeltas.Values)
-            {
-                ActionLedger.Ack(delta.ActionId);
-            }
-
-
             _pendingDeltas.Clear();
         }
 
@@ -748,12 +666,10 @@ namespace CardShopCoop.Modules.Grading
 
 
             _shutdown = true;
-            ActionLedger.ActionSettled -= RetireLocalJob;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;
             ClearPendingDeltas();
             _jobIds.Clear();
-            _localJobSets.Clear();
             _submitScreen = null;
             GradingInterop.Reset();
             if (ReferenceEquals(_active, this))

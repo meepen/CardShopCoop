@@ -11,8 +11,7 @@ namespace CardShopCoop.Modules.Shop
     /// <see cref="IsRename"/> marks a state that represents a committed rename (rather than a lock
     /// change or a baseline), so the client knows when to replay the host-owned tutorial naming
     /// side effects. <see cref="ActionId"/> and <see cref="Rejected"/> correlate the host's
-    /// echo/rejection with the optimistic rename or lock action in
-    /// <see cref="Actions.ActionLedger"/>.
+    /// echo/rejection with the optimistic rename or lock action.
     /// </summary>
     [GlobalInformation]
     [HostOnlyInformation]

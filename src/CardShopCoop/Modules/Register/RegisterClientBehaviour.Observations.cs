@@ -23,8 +23,6 @@ namespace CardShopCoop.Modules.Register
             public double ChangeValue;
         }
 
-        private ICoopContext Api => RuntimeContext;
-
         internal ActionCapture CaptureScanItem(InteractableScanItem item)
         {
             if (!CanObserve)
@@ -407,16 +405,8 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            var host = Api.HostConnection;
-            if (host == null)
-            {
-                CoopPlugin.Log.LogWarning("[register] dropped " + message.GetType().Name
-                    + " because the host connection is missing.");
-                return;
-            }
-
-            // The core action send allocates the id and records the replay/undo before it sends.
-            RuntimeContext.Send(host.Id, message);
+            // The core allocates the action id and records the prediction before it sends.
+            Context.Send(message);
             if (message.ActionId != Guid.Empty && message.Counter != null)
             {
                 _actionCounters[message.ActionId] = message.Counter;

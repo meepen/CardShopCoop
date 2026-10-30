@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Util;
@@ -40,7 +41,7 @@ namespace CardShopCoop.Runtime
             _context = context;
         }
 
-        public static CoopBehaviourRegistry CreateServer(GameObject parent, CoopRuntimeContext context)
+        internal static CoopBehaviourRegistry CreateServer(GameObject parent, CoopRuntimeContext context)
         {
             if (parent == null || context == null)
             {
@@ -51,7 +52,7 @@ namespace CardShopCoop.Runtime
                 activateOnCreate: false);
         }
 
-        public static CoopBehaviourRegistry CreateClient(GameObject parent, CoopRuntimeContext context)
+        internal static CoopBehaviourRegistry CreateClient(GameObject parent, CoopRuntimeContext context)
         {
             if (parent == null || context == null)
             {
@@ -62,7 +63,7 @@ namespace CardShopCoop.Runtime
                 activateOnCreate: false);
         }
 
-        public static CoopBehaviourRegistry CreatePersistent(GameObject parent,
+        internal static CoopBehaviourRegistry CreatePersistent(GameObject parent,
             CoopRuntimeContext context)
         {
             if (parent == null || context == null)
@@ -79,7 +80,7 @@ namespace CardShopCoop.Runtime
         /// built. The persistent registry is created during Awake, before dependents are loaded,
         /// so external persistent behaviours are attached here from the first frame.
         /// </summary>
-        public void AddExternalPersistent()
+        internal void AddExternalPersistent()
         {
             if (_disposed)
             {
@@ -277,7 +278,7 @@ namespace CardShopCoop.Runtime
         /// <summary>Activates the core module behaviours. Called after CoopCore has frozen the
         /// extended-information catalog and before the transport starts, preserving the internal
         /// pre-transport seed contract.</summary>
-        public void ActivateInternal()
+        internal void ActivateInternal()
         {
             if (_disposed)
             {
@@ -299,7 +300,7 @@ namespace CardShopCoop.Runtime
         /// deferred, so a mod's OnEnable/OnSessionStarted can safely use Context.Send/Broadcast and
         /// extended information.
         /// </summary>
-        public void ActivateExternal()
+        internal void ActivateExternal()
         {
             if (_disposed)
             {
@@ -397,15 +398,15 @@ namespace CardShopCoop.Runtime
             }
         }
 
-        public void ClientJoined(PeerConnection connection) => Invoke<OnClientJoinedAttribute>(connection);
-        public void ClientDisconnected(PeerConnection connection, DisconnectInfo info)
+        internal void ClientJoined(PeerConnection connection) => Invoke<OnClientJoinedAttribute>(connection);
+        internal void ClientDisconnected(PeerConnection connection, DisconnectInfo info)
             => Invoke<OnClientDisconnectedAttribute>(connection, info);
-        public void FullyJoined(PeerConnection connection) => Invoke<OnFullyJoinedAttribute>(connection);
+        internal void FullyJoined(PeerConnection connection) => Invoke<OnFullyJoinedAttribute>(connection);
 
         /// <summary>Starts the session once. Live and persistent runtimes each own a registry;
         /// the persistent registry is created before any session, so it receives this when a
         /// session actually starts.</summary>
-        public void SessionStarted()
+        internal void SessionStarted()
         {
             if (_sessionStarted)
             {
@@ -418,7 +419,7 @@ namespace CardShopCoop.Runtime
 
         /// <summary>Stops the session once. This makes the persistent runtime's session-stop
         /// event idempotent even though the same registry is later disposed at plugin unload.</summary>
-        public void SessionStopped()
+        internal void SessionStopped()
         {
             if (!_sessionStarted)
             {
@@ -429,7 +430,7 @@ namespace CardShopCoop.Runtime
             Invoke<OnSessionStoppedAttribute>();
         }
 
-        public void Dispose()
+        internal void Dispose()
         {
             if (_disposed)
             {
@@ -701,22 +702,42 @@ namespace CardShopCoop.Runtime
 
         private static void Validate(Attribute attribute, MethodInfo method)
         {
-            var expected = attribute switch
-            {
-                OnClientJoinedAttribute => new[] { typeof(PeerConnection) },
-                OnClientDisconnectedAttribute => new[] { typeof(PeerConnection), typeof(DisconnectInfo) },
-                OnFullyJoinedAttribute => new[] { typeof(PeerConnection) },
-                OnSessionStartedAttribute => Type.EmptyTypes,
-                OnSessionStoppedAttribute => Type.EmptyTypes,
-                _ => throw new InvalidOperationException("Unknown co-op behaviour event attribute.")
-            };
             var parameters = method.GetParameters();
-            if (method.IsStatic || method.ReturnType != typeof(void)
-                || !parameters.Select(p => p.ParameterType).SequenceEqual(expected))
+            var valid = false;
+            switch (attribute)
+            {
+                case OnClientJoinedAttribute:
+                case OnFullyJoinedAttribute:
+                    valid = parameters.Length == 1 && IsPeerParameter(parameters[0].ParameterType);
+                    break;
+
+                case OnClientDisconnectedAttribute:
+                    valid = parameters.Length == 2
+                        && IsPeerParameter(parameters[0].ParameterType)
+                        && parameters[1].ParameterType == typeof(DisconnectInfo);
+                    break;
+
+                case OnSessionStartedAttribute:
+                case OnSessionStoppedAttribute:
+                    valid = parameters.Length == 0;
+                    break;
+
+                default:
+                    throw new InvalidOperationException(
+                        "Unknown co-op behaviour event attribute.");
+            }
+
+            if (method.IsStatic || method.ReturnType != typeof(void) || !valid)
             {
                 throw new InvalidOperationException("Invalid co-op behaviour event signature: "
                     + method.DeclaringType?.FullName + "." + method.Name);
             }
         }
+
+        /// <summary>A lifecycle first parameter addresses the peer either through the internal
+        /// connection (built-in modules) or the public peer contract (external mods). The same
+        /// connection object implements both, so the registry passes it unchanged.</summary>
+        private static bool IsPeerParameter(Type type)
+            => type == typeof(PeerConnection) || type == typeof(ICoopPeer);
     }
 }

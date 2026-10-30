@@ -22,7 +22,7 @@ namespace CardShopCoop.Modules.Grading
         private const int VanillaSlots = 8;
         private static GradingHostBehaviour _active;
         private readonly Dictionary<GradeCardSubmitSet, Guid> _setIds = new();
-        private readonly HashSet<int> _joined = new();
+        private readonly Dictionary<int, PeerConnection> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
         private bool _shutdown;
         private bool _initialized;
@@ -81,7 +81,7 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            _joined.Add(peer.Id);
+            _joined[peer.Id] = peer;
             if (!FullUpdate(peer.Id))
             {
                 _baselinePending.Add(peer.Id);
@@ -122,7 +122,7 @@ namespace CardShopCoop.Modules.Grading
         {
             foreach (var pair in new Dictionary<GradeCardSubmitSet, Guid>(_setIds))
             {
-                BroadcastJobDelta(Guid.Empty, pair.Value, null, true);
+                BroadcastJobDelta(pair.Value, null, true);
             }
 
             _setIds.Clear();
@@ -145,7 +145,11 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            RuntimeContext.Send(connectionId, BuildState(list));
+            if (_joined.TryGetValue(connectionId, out var connection))
+            {
+                PeerHandle.ForConnection(connection)?.Send(BuildState(list));
+            }
+
             _baselinePending.Remove(connectionId);
             return true;
         }
@@ -154,7 +158,7 @@ namespace CardShopCoop.Modules.Grading
         {
             foreach (var connectionId in new List<int>(_baselinePending))
             {
-                if (!_joined.Contains(connectionId))
+                if (!_joined.ContainsKey(connectionId))
                 {
                     _baselinePending.Remove(connectionId);
                     continue;
@@ -187,7 +191,7 @@ namespace CardShopCoop.Modules.Grading
 
                     var id = GetSetId(set);
                     live.Add(id);
-                    BroadcastJobDelta(Guid.Empty, id, set, false);
+                    BroadcastJobDelta(id, set, false);
                 }
             }
 
@@ -196,7 +200,7 @@ namespace CardShopCoop.Modules.Grading
             {
                 if (!live.Contains(pair.Value))
                 {
-                    BroadcastJobDelta(Guid.Empty, pair.Value, null, true);
+                    BroadcastJobDelta(pair.Value, null, true);
                     removed.Add(pair.Key);
                 }
             }
@@ -350,11 +354,12 @@ namespace CardShopCoop.Modules.Grading
 
                 reservation.Commit();
                 var id = message.JobId;
-                BroadcastJobDelta(message.ActionId, id, set, false);
+                var delta = BuildJobDelta(id, set, false);
+                Context.BroadcastExcept(message.Peer, delta);
                 SceneRef<GradeCardWebsiteUIScreen>.Get()?.UpdateSubmissionProgressPanelUI();
                 CoopPlugin.Log.LogInfo("grading submission accepted for connection "
                     + senderConnection + " as set " + id);
-                return ActionOutcome.Applied();
+                return ActionOutcome.Applied(new GradingIntentResponse { Delta = delta });
             }
             catch (Exception error)
             {
@@ -486,7 +491,11 @@ namespace CardShopCoop.Modules.Grading
             }
             CoopPlugin.Log.LogWarning("grading submission rejected for connection "
                 + connectionId + " id=" + actionId + ": " + reason);
-            return ActionOutcome.Reject(reason);
+            return ActionOutcome.Reject(reason,
+                new GradingIntentResponse
+                {
+                    State = BuildState(CPlayerData.m_GradeCardInProgressList),
+                });
         }
 
         private Guid GetSetId(GradeCardSubmitSet set)
@@ -537,18 +546,21 @@ namespace CardShopCoop.Modules.Grading
             return message;
         }
 
-        private void BroadcastJobDelta(Guid actionId, Guid id, GradeCardSubmitSet set,
-            bool removed)
+        private void BroadcastJobDelta(Guid id, GradeCardSubmitSet set, bool removed)
         {
             if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
 
+            Context.Broadcast(BuildJobDelta(id, set, removed));
+        }
 
+        private GradingJobDeltaMessage BuildJobDelta(Guid id, GradeCardSubmitSet set,
+            bool removed)
+        {
             var message = new GradingJobDeltaMessage
             {
-                ActionId = actionId,
                 Id = id,
                 Removed = removed,
             };
@@ -565,7 +577,7 @@ namespace CardShopCoop.Modules.Grading
                 }
 
             }
-            RuntimeContext.Broadcast(message);
+            return message;
         }
 
         private static List<CardData> CloneCards(List<CardData> cards)

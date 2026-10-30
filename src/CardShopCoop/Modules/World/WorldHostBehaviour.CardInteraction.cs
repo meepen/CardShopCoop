@@ -1,5 +1,5 @@
-using CardShopCoop.Attributes;
 using CardShopCoop.Api;
+using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 
@@ -7,6 +7,11 @@ namespace CardShopCoop.Modules.World
 {
     public sealed partial class WorldHostBehaviour
     {
+        /// <summary>Reason for a card or container command that arrives before the host can apply
+        /// it. The sender still gets an answer, so its prediction is reversed instead of left
+        /// waiting.</summary>
+        private const string CardSessionNotReady = "the session is not ready for card actions";
+
         private void InstallCardInteractionPatches()
         {
             WorldCardInteractionPatches.Apply(Harmony);
@@ -14,55 +19,112 @@ namespace CardShopCoop.Modules.World
             WorldMarketInteraction.ApplyPatches(Harmony);
         }
 
+        /// <summary>One player left: return the shared cards their accepted removals still own, and
+        /// drop the container holds and pack claims addressed to them.</summary>
         [OnClientDisconnected]
-        private void ReleaseCardClaims(PeerConnection connection, DisconnectInfo info)
+        private void ReleaseCardClaims(ICoopPeer peer, DisconnectInfo _)
         {
-            if (connection != null)
+            var player = peer?.Player;
+            if (player == null)
             {
-                _cardInteraction?.Containers.HostReleaseConn(connection.Id);
-                _cardInteraction?.ForgetGradingOwnership(connection.Id);
+                return;
             }
+
+            _cardInteraction?.Containers.HostReleaseConn(player.Id);
+            _cardInteraction?.ForgetGradingOwnership(player.Id);
         }
 
+        // ---------------- card commands ----------------
+
+        /// <summary>One client's card change: a collection-binder pick (the shared collection goes
+        /// down and a physical card enters that player's hand), a deposit, or a card a pack opener
+        /// produced. The host applies it to the shared collection itself and answers the sender;
+        /// every other peer receives the resulting delta as ordinary card state.</summary>
         [MessageHandler]
-        private ActionOutcome HandleCardDelta(MessageContext context,
+        private ActionOutcome HandleCardDelta(CoopMessageContext context,
             CardDeltaRequestMessage message)
         {
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
+            if (!CanApplyCardCommand(context, nameof(HandleCardDelta)))
             {
-                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
-                    _cardInteraction != null
-                        && _cardInteraction.HandleCardDelta(context.ConnectionId, message)));
+                return ActionOutcome.Reject(CardSessionNotReady);
             }
 
-            return RejectWorldIntent(context, message);
+            if (message?.Card == null)
+            {
+                CoopPlugin.Log.LogWarning("[cards] dropped a card action: the card did not resolve "
+                    + "to live card data.");
+                return ActionOutcome.Reject("the card did not resolve to live card data");
+            }
+
+            return _cardInteraction.HandleCardDelta(context, message);
         }
 
+        /// <summary>One client's bulk card movement (a bundle, a trade hand-off, or one capped
+        /// pack-opener reveal chunk). The batch is atomic on the host: a refusal retracts whatever
+        /// part of it was already applied, so the sender always rolls back to the same state.</summary>
         [MessageHandler]
-        private ActionOutcome HandleCardDeltaBatch(MessageContext context,
+        private ActionOutcome HandleCardDeltaBatch(CoopMessageContext context,
             CardDeltaBatchRequestMessage message)
         {
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
+            if (!CanApplyCardCommand(context, nameof(HandleCardDeltaBatch)))
             {
-                return CommandOutcome(ExecuteWorldCommand(context, message, ()
-                    => ApplyCardDeltaBatchCommand(context, message)));
+                return ActionOutcome.Reject(CardSessionNotReady);
             }
 
-            return RejectWorldIntent(context, message);
+            if (message?.Deltas == null || message.Deltas.Count == 0)
+            {
+                CoopPlugin.Log.LogWarning("[cards] dropped a card batch: it carries no deltas.");
+                return ActionOutcome.Reject("the card batch carries no deltas");
+            }
+
+            return _cardInteraction.HandleCardDeltaBatch(context, message);
         }
 
+        /// <summary>One client's graded-album removal: taking a slab out of the graded binder. The
+        /// host applies it to the shared graded album and answers the sender; the removal of the
+        /// certificate reaches the other peers as authoritative state.</summary>
         [MessageHandler]
-        private ActionOutcome HandleGradedRemove(MessageContext context,
+        private ActionOutcome HandleGradedRemove(CoopMessageContext context,
             GradedRemoveRequestMessage message)
         {
-            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
+            if (!CanApplyCardCommand(context, nameof(HandleGradedRemove)))
             {
-                return CommandOutcome(ExecuteWorldCommand(context, message, ()
-                    => ApplyGradedRemoveCommand(context, message)));
+                return ActionOutcome.Reject(CardSessionNotReady);
             }
 
-            return RejectWorldIntent(context, message);
+            if (message?.Card == null)
+            {
+                CoopPlugin.Log.LogWarning("[cards] dropped a graded removal: the card did not "
+                    + "resolve to live card data.");
+                return ActionOutcome.Reject("the card did not resolve to live card data");
+            }
+
+            return _cardInteraction.HandleGradedRemove(context, message);
         }
+
+        /// <summary>The authenticated sender's stable player identity. The card interaction keys
+        /// the grading claims a player's accepted removals still own under it (player 0 is the
+        /// host). Derived from the peer, never from a connection id.</summary>
+        private static int ActorId(CoopMessageContext context) => context.Peer.Player.Id;
+
+        /// <summary>The shared gate for every card and container command. Authentication is the
+        /// framework's job; this only refuses a command that arrives before the world is playable,
+        /// or while the card sync module is stopped.</summary>
+        private bool CanApplyCardCommand(CoopMessageContext context, string what)
+        {
+            if (_cardInteraction != null && Context.InGame && context?.IsAuthenticated == true)
+            {
+                return true;
+            }
+
+            CoopPlugin.Log.LogWarning("[cards] refused " + what + ": cardSync="
+                + (_cardInteraction != null) + " inGame=" + Context.InGame + " peer="
+                + (context?.Peer == null ? "none" : context.Peer.State.ToString()) + ".");
+            return false;
+        }
+
+        // ---------------- container commands ----------------
+
         [IntentValidator]
         private IntentValidation ValidateEmptyBoxTake(CoopMessageContext context,
             EmptyBoxTakeIntent message)
@@ -76,7 +138,7 @@ namespace CardShopCoop.Modules.World
         private IntentValidation ValidateEmptyBoxIntent(CoopMessageContext context,
             InteractableObject container, bool take)
         {
-            if (!RuntimeContext.InGame() || context?.Connection == null)
+            if (!Context.InGame || context?.Peer == null)
             {
                 return IntentValidation.Deny("session is not active");
             }
@@ -100,33 +162,19 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleEmptyBoxTake(MessageContext context, EmptyBoxTakeIntent message)
-        {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
-            {
-                return RejectWorldIntent(context, message);
-            }
-
-            return CommandOutcome(ExecuteWorldCommand(context, message,
-                () => ApplyContainerCommand(context, message)));
-        }
+        private ActionOutcome HandleEmptyBoxTake(CoopMessageContext context,
+            EmptyBoxTakeIntent message)
+            => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private ActionOutcome HandleEmptyBoxStore(MessageContext context, EmptyBoxStoreIntent message)
-        {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
-            {
-                return RejectWorldIntent(context, message);
-            }
-
-            return CommandOutcome(ExecuteWorldCommand(context, message,
-                () => ApplyContainerCommand(context, message)));
-        }
+        private ActionOutcome HandleEmptyBoxStore(CoopMessageContext context,
+            EmptyBoxStoreIntent message)
+            => ApplyContainerIntent(context, message);
 
         private IntentValidation ValidateContainerCommand(CoopMessageContext context,
             InteractableObject container)
         {
-            if (!RuntimeContext.InGame() || context?.Connection == null)
+            if (!Context.InGame || context?.Peer == null)
             {
                 return IntentValidation.Deny("session is not active");
             }
@@ -173,75 +221,67 @@ namespace CardShopCoop.Modules.World
         private IntentValidation Validate(CoopMessageContext context, WorkerTakeFlagIntent m)
             => ValidateContainerCommand(context, m?.Container);
 
-        private ActionOutcome ApplyContainerIntent(MessageContext context, ContainerIntent intent)
+        /// <summary>Applies one container command on the host. The container module validates the
+        /// operation against its own live record, publishes the resulting record to the other
+        /// peers, and returns the acting client's own hand flags in the action response.</summary>
+        private ActionOutcome ApplyContainerIntent(CoopMessageContext context, ContainerIntent intent)
         {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || intent?.Container == null)
+            if (intent == null)
             {
-                return RejectWorldIntent(context, intent);
+                CoopPlugin.Log.LogWarning("[containers] dropped a container action: it carries no "
+                    + "command.");
+                return ActionOutcome.Reject("the container action carries no command");
             }
 
-            return CommandOutcome(ExecuteWorldCommand(context, intent,
-                () => ApplyContainerCommand(context, intent)));
-        }
-
-        [MessageHandler]
-        private ActionOutcome HandleContentSet(MessageContext context, ContainerContentSetIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandlePackInsert(MessageContext context, PackInsertIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandlePackTurnOn(MessageContext context, PackTurnOnIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandlePackCollect(MessageContext context, PackCollectIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandlePackClaim(MessageContext context, PackClaimIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandleCleanserToggle(MessageContext context, CleanserToggleIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandleCleanserRefill(MessageContext context, CleanserRefillIntent message)
-            => ApplyContainerIntent(context, message);
-
-        [MessageHandler]
-        private ActionOutcome HandleWorkerTakeFlag(MessageContext context, WorkerTakeFlagIntent message)
-            => ApplyContainerIntent(context, message);
-
-        private bool ApplyCardDeltaBatchCommand(MessageContext context,
-            CardDeltaBatchRequestMessage message)
-        {
-            return _cardInteraction != null
-                && _cardInteraction.HandleCardDeltaBatch(context.ConnectionId, message);
-        }
-
-        private bool ApplyGradedRemoveCommand(MessageContext context,
-            GradedRemoveRequestMessage message)
-        {
-            return _cardInteraction != null
-                && _cardInteraction.HandleGradedRemove(context.ConnectionId, message);
-        }
-
-        private bool ApplyContainerCommand(MessageContext context, ContainerIntent message)
-        {
-            if (_cardInteraction == null)
+            if (!CanApplyCardCommand(context, intent.GetType().Name))
             {
-
-                return false;
+                return ActionOutcome.Reject(CardSessionNotReady);
             }
 
+            if (intent.Container == null)
+            {
+                CoopPlugin.Log.LogWarning("[containers] dropped "
+                    + intent.GetType().Name + ": the container did not resolve to a live object.");
+                return ActionOutcome.Reject("the container did not resolve to a live object");
+            }
 
-            return _cardInteraction.Containers.HostApplyIntent(message, context.ConnectionId,
-                response => SendWorldTo(context.ConnectionId, response));
+            return _cardInteraction.Containers.HostApplyIntent(intent, context);
         }
 
+        [MessageHandler]
+        private ActionOutcome HandleContentSet(CoopMessageContext context,
+            ContainerContentSetIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandlePackInsert(CoopMessageContext context, PackInsertIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandlePackTurnOn(CoopMessageContext context, PackTurnOnIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandlePackCollect(CoopMessageContext context, PackCollectIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandlePackClaim(CoopMessageContext context, PackClaimIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandleCleanserToggle(CoopMessageContext context,
+            CleanserToggleIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandleCleanserRefill(CoopMessageContext context,
+            CleanserRefillIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private ActionOutcome HandleWorkerTakeFlag(CoopMessageContext context,
+            WorkerTakeFlagIntent message)
+            => ApplyContainerIntent(context, message);
     }
 }

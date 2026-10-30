@@ -1,10 +1,11 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
 
@@ -87,8 +88,8 @@ namespace CardShopCoop.Modules.Decoration
             }
 
             // Decoration lifecycle (added/moved/removed) is applied by the identity messages.
-            // This delta only settles inventory/equip state, including the actor's prediction.
-            ActionLedger.Confirm(message.ActionId, () => ApplyDelta(message));
+            // This delta only settles inventory/equip state.
+            ApplyDelta(message);
         }
 
         private static void ApplyDelta(DecorationDeltaMessage message)
@@ -135,37 +136,21 @@ namespace CardShopCoop.Modules.Decoration
         }
 
         /// <summary>Records a decoration action the game already performed (the hook observes
-        /// vanilla from a postfix) as one post-hoc prediction. apply/undo redo and reverse the same
-        /// change through the module's game path so a rejection can be reconciled; the game owns the
-        /// local mutation.</summary>
-        private static void Predict(DecorationIntentMessage message, Action apply, Action undo)
+        /// vanilla from a postfix) as one prediction. The prediction reverses the local change and
+        /// settles it against the host's response; the game owns the local mutation.</summary>
+        private static void Predict(DecorationIntentMessage message,
+            IDecorationPrediction prediction)
         {
             var client = _active;
             if (client == null || client._shutdown || !client._joined
-                || !client.RuntimeContext.InGame() || !ActionLedger.IsActive
-                || ActionLedger.IsReconciling)
+                || !client.RuntimeContext.InGame()
+                || ReentrancyGuard.Suppressed(client))
             {
                 return;
             }
 
-
-            ActionLedger.Submit("decoration",
-                actionId =>
-                {
-                    message.ActionId = actionId;
-                    client.RuntimeContext.Send(1, message);
-                }, apply, undo);
-        }
-
-        /// <summary>Redoes the wallet half of a replay. Queued during reconciliation, so the Hud
-        /// economy observer does not forward it as a second contribution.</summary>
-        private static void Charge(float amount)
-        {
-            if (amount > 0.0001f)
-            {
-                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(amount));
-            }
-
+            message.Prediction = prediction;
+            client.Context.Send(message);
         }
 
         /// <summary>Reverses the wallet half of a rejected buy through the game's own coin event.</summary>
@@ -178,23 +163,27 @@ namespace CardShopCoop.Modules.Decoration
 
         }
 
-        private static void PredictState(DecorationIntentMessage message)
+        /// <summary>One equip/buy prediction: restores the captured snapshot (and refunds the
+        /// wallet for a buy) on rejection, then merges the host's authoritative response.</summary>
+        private sealed class StatePrediction : IDecorationPrediction
         {
-            var predicted = new DecorationDeltaMessage
+            private readonly DecorationSnapshot _before;
+            private readonly float _refund;
+
+            internal StatePrediction(DecorationSnapshot before, float refund)
             {
-                Action = message.Action,
-                Category = message.Category,
-                Index = message.Index,
-                DecorationType = message.DecorationType,
-                LotB = message.LotB,
-            };
-            if (message.Action == DecorationActions.BuyItemDecoration)
-            {
-                predicted.InventoryCount = DecorationInterop.InventoryCount(message.DecorationType) + 1;
+                _before = before;
+                _refund = refund;
             }
 
+            public void Undo()
+            {
+                UndoState(_before);
+                Refund(_refund);
+            }
 
-            ApplyDelta(predicted);
+            public void Merge(ActionResponseMessage response)
+                => _active?.ApplyResponse(response);
         }
 
         private static void UndoState(DecorationSnapshot before)
@@ -227,6 +216,34 @@ namespace CardShopCoop.Modules.Decoration
                     _active._applyingState--;
                 }
 
+            }
+        }
+
+        /// <summary>Applies an authoritative decoration response from another module's predicted
+        /// action (identity placement/removal) through the same client path.</summary>
+        internal static void ApplyResponseState(ActionResponseMessage response)
+            => _active?.ApplyResponse(response);
+
+        /// <summary>The host's answer: an authoritative snapshot on reject, the post-action delta
+        /// on accept. The snapshot goes through the same deferred-apply path as a join state so a
+        /// scene that is still loading keeps the latest value.</summary>
+        private void ApplyResponse(ActionResponseMessage response)
+        {
+            if (_shutdown || response is not DecorationIntentResponse result)
+            {
+                return;
+            }
+
+            if (result.State != null)
+            {
+                _pendingState = result.State;
+                TryApplyPending();
+                return;
+            }
+
+            if (result.Delta != null)
+            {
+                ApplyDelta(result.Delta);
             }
         }
 
@@ -311,7 +328,7 @@ namespace CardShopCoop.Modules.Decoration
             {
                 __state = null;
                 if (!IsClientReady() || _active._applyingState != 0
-                    || ActionLedger.IsReconciling)
+                    || ReentrancyGuard.Suppressed(_active))
                 {
                     return;
                 }
@@ -330,7 +347,7 @@ namespace CardShopCoop.Modules.Decoration
             private static void Postfix(State __state)
             {
                 if (__state == null || !IsClientReady() || _active._applyingState != 0
-                    || ActionLedger.IsReconciling)
+                    || ReentrancyGuard.Suppressed(_active))
                 {
                     return;
                 }
@@ -343,13 +360,7 @@ namespace CardShopCoop.Modules.Decoration
                     Index = __state.Index,
                     LotB = __state.LotB,
                 };
-                Predict(message, () => DecorationInterop.ApplyDelta(new DecorationDeltaMessage
-                {
-                    Action = message.Action,
-                    Category = message.Category,
-                    Index = message.Index,
-                    LotB = message.LotB,
-                }), () => UndoState(__state.Before));
+                Predict(message, new StatePrediction(__state.Before, 0f));
             }
         }
 
@@ -419,17 +430,7 @@ namespace CardShopCoop.Modules.Decoration
 
 
             var before = state.Before;
-            Predict(message,
-                () =>
-                {
-                    PredictState(message);
-                    Charge(spent);
-                },
-                () =>
-                {
-                    UndoState(before);
-                    Refund(spent);
-                });
+            Predict(message, new StatePrediction(before, spent));
         }
 
         [HarmonyPatch(typeof(ShopBuyDecoUIScreen), "OnPressBuyShopDeco")]

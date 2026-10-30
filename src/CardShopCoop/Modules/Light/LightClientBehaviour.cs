@@ -1,6 +1,5 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -13,7 +12,6 @@ namespace CardShopCoop.Modules.Light
     [ClientBehaviour]
     public sealed class LightClientBehaviour : CoopBehaviour
     {
-        private const string PredictionScope = "light";
         private static LightClientBehaviour _active;
         private bool _shutdown;
         private bool _initialized;
@@ -70,12 +68,6 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            if (_pendingState != null)
-            {
-                ActionLedger.Ack(_pendingState.ActionId);
-            }
-
-
             _pendingState = message;
             TryApplyPending();
         }
@@ -97,13 +89,10 @@ namespace CardShopCoop.Modules.Light
 
 
             var pending = _pendingState;
-            // The host message is the shop light's absolute authoritative state, and a host
-            // broadcast (its own click or automation) can cross our echo on the wire. Reconcile in
-            // layers instead of retiring and skipping: the host's value always lands, and a newer
-            // local toggle the host has not processed yet is undone and replayed rather than
-            // stranded under the crossed value. An empty or already-retired id just applies.
-            ActionLedger.ApplyAuthoritative(pending.ActionId,
-                () => LightSwitchState.Apply(pending.IsActive));
+            // Host messages arrive in the host's send order on this one connection, so the newest
+            // absolute flag always lands last. A local toggle still awaiting its decision is
+            // settled by its own response, which the host sends after this state.
+            LightSwitchState.Apply(pending.IsActive);
             _pendingState = null;
         }
 
@@ -126,15 +115,11 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            ActionLedger.Submit(
-                PredictionScope,
-                actionId => RuntimeContext.Send(1, new LightSwitchIntentMessage
-                {
-                    ActionId = actionId,
-                    IsActive = after,
-                }),
-                () => LightSwitchState.Apply(after),
-                () => LightSwitchState.Apply(prior));
+            Context.Send(new LightSwitchIntentMessage
+            {
+                IsActive = after,
+                Previous = prior,
+            });
 
             // The game's click refreshes only the clicked switch's models; automation usually
             // leaves them stale. Normalize the module's full surface now instead of waiting for

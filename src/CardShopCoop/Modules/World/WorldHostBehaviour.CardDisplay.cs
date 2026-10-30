@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -19,169 +18,129 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleCardDisplayRequest(MessageContext context,
+        private ActionOutcome HandleCardDisplayRequest(CoopMessageContext context,
             CardDisplayRequestMessage message)
         {
-            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message == null)
+            var requested = message?.State;
+            if (!Context.InGame || context?.IsAuthenticated != true || requested?.Shelf == null)
             {
-                return RejectWorldIntent(context, message);
+                return ActionOutcome.Reject("card display request is not admitted");
             }
 
-            if (message.Shelf == null)
+            if (!WorldCardDisplay.TryGetCompartment(requested.Shelf, requested.Compartment,
+                out var compartment))
             {
-                CoopPlugin.Log.LogWarning("[card-display] dropped request: the display shelf did not "
-                    + "resolve to a live object.");
-                return RejectWorldIntent(context, message);
+                CoopPlugin.Log.LogWarning("[card-display] dropped request: shelf="
+                    + requested.Shelf.name + " has no compartment " + requested.Compartment + ".");
+                return ActionOutcome.Reject("the display slot is not live");
             }
 
-            var echo = default(CardDisplayMessage);
-            var result = ExecuteWorldCommand(context, message, () =>
+            string reason = null;
+            _cardDisplayApplying = true;
+            try
             {
-                if (!WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
-                    out var compartment))
+                if (!requested.Occupied)
                 {
-                    CoopPlugin.Log.LogWarning("[card-display] dropped request: shelf="
-                        + message.Shelf.name + " has no compartment " + message.Compartment + ".");
-                    return false;
-                }
-
-                _cardDisplayApplying = true;
-                try
-                {
-                    if (!message.Occupied)
+                    // The removal must name the card the slot still holds. The host's own actors
+                    // can consume the displayed card while the guest's removal is in flight (a
+                    // customer buys it, a worker restocks); clearing blindly would destroy the
+                    // OTHER card's state and leave the guest holding a copy the host no longer has.
+                    var card = WorldCardDisplay.FromState(requested.Card);
+                    if (card == null
+                        || !WorldCardDisplay.Matches(compartment, card, requested.EncodedGrade))
                     {
-                        // The removal must name the card the slot still holds. The host's own
-                        // actors can consume the displayed card while the guest's removal is in
-                        // flight (a customer buys it, a worker restocks); clearing blindly would
-                        // destroy the OTHER card's state and leave the guest holding a copy the
-                        // host no longer has.
-                        var requested = WorldCardDisplay.FromState(message.Card);
-                        if (requested == null
-                            || !WorldCardDisplay.Matches(compartment, requested,
-                                message.EncodedGrade))
-                        {
-                            CoopPlugin.Log.LogWarning("[card-display] rejected removal shelf="
-                                + message.Shelf.name + " compartment=" + message.Compartment
-                                + ": the slot does not hold the named card.");
-                            return false;
-                        }
-
-                        WorldCardDisplay.Clear(compartment);
+                        reason = "the slot does not hold the named card";
                     }
                     else
                     {
-                        var card = WorldCardDisplay.FromState(message.Card);
-                        if (card == null)
+                        WorldCardDisplay.Clear(compartment);
+                    }
+                }
+                else
+                {
+                    var card = WorldCardDisplay.FromState(requested.Card);
+                    if (card == null)
+                    {
+                        reason = "the placed card did not resolve";
+                    }
+                    else if (!WorldCardDisplay.Matches(compartment, card, requested.EncodedGrade))
+                    {
+                        if (compartment.m_StoredCardList != null
+                            && compartment.m_StoredCardList.Count > 0)
                         {
-                            return false;
+                            WorldCardDisplay.Clear(compartment);
                         }
 
-                        if (WorldCardDisplay.Matches(compartment, card, message.EncodedGrade))
+                        if (!WorldCardDisplay.Place(compartment, card))
                         {
-                            // Already the authoritative state (resend of a confirmed placement).
-                        }
-                        else
-                        {
-                            if (compartment.m_StoredCardList.Count > 0)
-                            {
-                                WorldCardDisplay.Clear(compartment);
-                            }
-
-                            if (!WorldCardDisplay.Place(compartment, card))
-                            {
-                                return false;
-                            }
+                            reason = "the card could not be placed";
                         }
                     }
                 }
-                finally
-                {
-                    _cardDisplayApplying = false;
-                }
-
-                echo = new CardDisplayMessage
-                {
-                    ActionId = message.ActionId,
-                    Shelf = message.Shelf,
-                    Compartment = message.Compartment,
-                    Occupied = message.Occupied,
-                    Card = message.Occupied ? message.Card : null,
-                    EncodedGrade = message.Occupied ? message.EncodedGrade : -1,
-                };
-                return true;
-            });
-
-            if (result == WorldCommandResult.Applied && echo != null)
+            }
+            finally
             {
-                BroadcastWorld(echo);
-                return ActionOutcome.Applied();
+                _cardDisplayApplying = false;
             }
 
-            // A refused display change must first reverse the guest's optimistic placement (the
-            // card left the shared collection when it was picked up) and only THEN apply the
-            // host's real slot state. Sending the authority first retires the action without its
-            // undo and loses the guest's card. Send the one generic rollback here, before the
-            // refresh, and report Applied so the framework does not send a second one. A duplicate
-            // never applied anything, so it only refreshes.
-            if (result == WorldCommandResult.Rejected)
+            var authoritative = BuildCardDisplayState(compartment);
+            if (authoritative == null)
             {
-                ActionLedger.Rollback(RuntimeContext, context.ConnectionId, message.ActionId);
+                return ActionOutcome.Reject(reason ?? "the display slot could not be read");
             }
 
-            if (WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
-                out var rejectedCompartment))
-            {
-                RefreshRejectedCardDisplay(context, message, rejectedCompartment);
-            }
-
-            return ActionOutcome.Applied();
+            // The actor receives this same state in its response; every other peer mirrors it as
+            // authoritative slot state. Publishing on a rejection too keeps a partial host apply
+            // (a clear that could not be replaced) consistent everywhere.
+            Context.BroadcastExcept(context.Peer, new CardDisplayMessage { State = authoritative });
+            return reason == null
+                ? ActionOutcome.Applied(new CardDisplayResponse { State = authoritative })
+                : ActionOutcome.Reject(reason, new CardDisplayResponse { State = authoritative });
         }
 
-        /// <summary>After a refusal, tell the requester the slot's real state so the rollback's
-        /// restored card is replaced by authority rather than leaving a ghost on the shelf.</summary>
-        private void RefreshRejectedCardDisplay(MessageContext context,
-            CardDisplayRequestMessage request, InteractableCardCompartment compartment)
+        private static CardDisplayState BuildCardDisplayState(InteractableCardCompartment compartment)
         {
-            if (context?.Connection == null || request == null || compartment == null
-                || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
+            if (!WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
             {
-                return;
+                return null;
             }
 
             var card = WorldCardDisplay.Read(compartment);
-            SendWorldTo(context.ConnectionId, new CardDisplayMessage
+            return new CardDisplayState
             {
-                ActionId = request.ActionId,
                 Shelf = shelf,
                 Compartment = index,
                 Occupied = card != null,
                 Card = card == null ? null : WorldCardDisplay.ToState(card),
                 EncodedGrade = card == null ? -1 : WorldCardDisplay.EncodedGradeOf(card),
-            });
+            };
         }
 
         /// <summary>Host-initiated display changes (the host player placing a card, a worker
         /// restocking, or a customer buying a displayed card) are announced so every guest mirrors
         /// them. Remote applies made through <see cref="HandleCardDisplayRequest"/> are excluded by
-        /// the in-flight guard because the handler publishes the prediction-stamped echo itself.</summary>
+        /// the in-flight guard because the handler publishes the state itself.</summary>
         private void PublishHostCardDisplay(InteractableCardCompartment compartment, bool occupied)
         {
-            if (_shutdown || _cardDisplayApplying || compartment == null || !RuntimeContext.InGame()
-                || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
+            if (_shutdown || _cardDisplayApplying || compartment == null || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            var card = occupied ? WorldCardDisplay.Read(compartment) : null;
-            var grade = occupied ? WorldCardDisplay.EncodedGradeOf(card) : -1;
-            BroadcastWorld(new CardDisplayMessage
+            var state = BuildCardDisplayState(compartment);
+            if (state == null)
             {
-                Shelf = shelf,
-                Compartment = index,
-                Occupied = occupied,
-                Card = occupied ? WorldCardDisplay.ToState(card) : null,
-                EncodedGrade = grade,
-            });
+                return;
+            }
+
+            state.Occupied = occupied;
+            if (!occupied)
+            {
+                state.Card = null;
+                state.EncodedGrade = -1;
+            }
+
+            Context.Broadcast(new CardDisplayMessage { State = state });
         }
 
         private void AppendCardDisplayBaseline(Action<INetMessage> append)
@@ -221,8 +180,7 @@ namespace CardShopCoop.Modules.World
                 var compartments = shelf.GetCardCompartmentList();
                 for (var j = 0; compartments != null && j < compartments.Count; j++)
                 {
-                    var compartment = compartments[j];
-                    var card = WorldCardDisplay.Read(compartment);
+                    var card = WorldCardDisplay.Read(compartments[j]);
                     if (card == null)
                     {
                         continue;
@@ -230,11 +188,14 @@ namespace CardShopCoop.Modules.World
 
                     append(new CardDisplayMessage
                     {
-                        Shelf = shelf,
-                        Compartment = j,
-                        Occupied = true,
-                        Card = WorldCardDisplay.ToState(card),
-                        EncodedGrade = WorldCardDisplay.EncodedGradeOf(card),
+                        State = new CardDisplayState
+                        {
+                            Shelf = shelf,
+                            Compartment = j,
+                            Occupied = true,
+                            Card = WorldCardDisplay.ToState(card),
+                            EncodedGrade = WorldCardDisplay.EncodedGradeOf(card),
+                        },
                     });
                 }
             }

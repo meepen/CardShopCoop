@@ -4,7 +4,6 @@ using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -74,7 +73,6 @@ namespace CardShopCoop.Modules.Purchasing
 
             try
             {
-                ActionLedger.ActionSettled += RetirePendingRequest;
                 _active = this;
                 Patch(typeof(RestockCheckoutPatch));
                 Patch(typeof(ScannerCheckoutPatch));
@@ -86,7 +84,6 @@ namespace CardShopCoop.Modules.Purchasing
             {
 
 
-                ActionLedger.ActionSettled -= RetirePendingRequest;
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -98,51 +95,54 @@ namespace CardShopCoop.Modules.Purchasing
             _initialized = true;
         }
 
-        [MessageHandler]
-        private void HandleOutcome(MessageContext context, PurchaseOutcomeMessage outcome)
+        /// <summary>Reverses a refused checkout: restores the cart or confirmation, retires the
+        /// boxes this checkout minted and refunds the mirrored debit.</summary>
+        internal static void RejectSubmission(Guid actionId)
         {
-            if (_shutdown)
+            var client = _active;
+            if (client == null || !client._pendingRequests.TryGetValue(actionId, out var pending))
             {
                 return;
             }
 
+            client._pendingRequests.Remove(actionId);
+            Undo(pending);
+        }
 
-            if (!outcome.Success || !_pendingRequests.TryGetValue(outcome.ActionId,
-                out var pending))
+        /// <summary>Settles an accepted checkout against the host's answer: applies the idempotent
+        /// local bookkeeping, destroys the boxes the host refused, and shows the host's status.
+        /// A rejected answer is already settled by <see cref="RejectSubmission"/>.</summary>
+        internal static void AcceptSubmission(Guid actionId, ActionResponseMessage response)
+        {
+            var client = _active;
+            if (client == null || response is not PurchaseOutcomeMessage outcome)
+            {
+                client?._pendingRequests.Remove(actionId);
+                return;
+            }
+
+            client._pendingRequests.TryGetValue(actionId, out var pending);
+            client._pendingRequests.Remove(actionId);
+            if (!outcome.Success)
             {
                 return;
             }
 
-            _pendingRequests.Remove(outcome.ActionId);
-            CoopPlugin.Log.LogInfo("[purchasing] host " + outcome.Kind + " outcome: "
-                + (outcome.Success ? "accepted" : "rejected")
+            CoopPlugin.Log.LogInfo("[purchasing] host " + outcome.Kind + " outcome: accepted"
                 + (outcome.RejectedBoxIds != null && outcome.RejectedBoxIds.Count > 0
                     ? ", rejectedBoxes=" + outcome.RejectedBoxIds.Count : "")
                 + " (" + outcome.Text + ").");
-            // The host accepted the purchase; its identity descriptors own the delivered boxes.
-            // Confirm, not AckOrApply: retire the prediction AND always apply the local
-            // bookkeeping (clearing the cart / closing the confirmation). Vanilla normally did
-            // that already, and the apply is idempotent, but if this peer's checkout charged
-            // without clearing (or a later rollback restored the cart), skipping it strands a
-            // cart that every later click would charge again. The wallet charge stays separate:
-            // vanilla already charged, so only a replay after a rollback re-charges.
-            ActionLedger.Confirm(outcome.ActionId, () =>
-                ApplyAccepted(pending));
+            if (pending != null)
+            {
+                ApplyAccepted(pending);
+            }
 
-            // The host tells us exactly which minted boxes it did not create. Destroy those local
-            // GameObjects (and drop any that never spawned). A fully rejected shipment arrives as
-            // the generic rollback instead, whose undo does the same for every minted id.
             if (outcome.RejectedBoxIds != null && outcome.RejectedBoxIds.Count > 0)
             {
                 WorldClientBehaviour.RollbackClientCreated(outcome.RejectedBoxIds);
             }
-            // The client runs the vanilla checkout like any other player, so the game itself
-            // already applied the product-license entitlement side effects (achievement and the
-            // UnlockBasicCardBox tutorial task) and played SFX_CustomerBuy for its local
-            // purchase. Re-applying the side effects here would double-count the tutorial credit.
-            // A license the host accepted for a checkout vanilla refused locally is applied by
-            // the authoritative CatalogLicenseDeltaMessage, which owns the once-guard.
-            ShowStatus(outcome.Text);
+
+            client.ShowStatus(outcome.Text);
         }
 
         internal void Shutdown()
@@ -154,7 +154,6 @@ namespace CardShopCoop.Modules.Purchasing
 
 
             _shutdown = true;
-            ActionLedger.ActionSettled -= RetirePendingRequest;
             _pendingRequests.Clear();
             if (ReferenceEquals(_active, this))
             {
@@ -165,9 +164,6 @@ namespace CardShopCoop.Modules.Purchasing
         }
 
         private void OnDestroy() => Shutdown();
-
-        private void RetirePendingRequest(Guid actionId)
-            => _pendingRequests.Remove(actionId);
 
         private void Patch(Type type)
             => Harmony.CreateClassProcessor(type).Patch();
@@ -513,44 +509,26 @@ namespace CardShopCoop.Modules.Purchasing
                 + " lines=" + (intent is RestockPurchaseIntent restock ? restock.Lines.Count : 0)
                 + " boxes=" + pending.BoxIds.Count
                 + " appendedDeliveries=" + pending.AppendedDeliveries + ".");
-            ActionLedger.Submit(
-                "purchasing",
-                actionId =>
+            try
+            {
+                Context.Send(intent);
+                _pendingRequests[intent.ActionId] = pending;
+            }
+            catch
+            {
+                if (pending.Surface == PendingSurface.Furniture)
                 {
-                    intent.ActionId = actionId;
-                    _pendingRequests[actionId] = pending;
-                    try
-                    {
-                        RuntimeContext.Send(1, intent);
-                    }
-                    catch
-                    {
-                        _pendingRequests.Remove(actionId);
-                        if (pending.Surface == PendingSurface.Furniture)
-                        {
-                            WorldClientBehaviour.RollbackClientFurniture(
-                                pending.BoxIds.Count > 0 ? pending.BoxIds[0] : Guid.Empty);
-                        }
-                        else
-                        {
-                            WorldClientBehaviour.RollbackClientCreated(pending.BoxIds);
-                        }
+                    WorldClientBehaviour.RollbackClientFurniture(
+                        pending.BoxIds.Count > 0 ? pending.BoxIds[0] : Guid.Empty);
+                }
+                else
+                {
+                    WorldClientBehaviour.RollbackClientCreated(pending.BoxIds);
+                }
 
-                        WorldClientBehaviour.CancelPendingClientDeliveries(pending.AppendedDeliveries);
-                        throw;
-                    }
-                },
-                () => ReplayAccepted(pending),
-                () => Undo(pending));
-        }
-
-        /// <summary>A reconcile replay of an accepted purchase: redo the local bookkeeping and
-        /// mirror the wallet debit, because <see cref="Undo"/> refunded it while rolling the
-        /// layer back. The accepted-outcome path must NOT charge (vanilla already did).</summary>
-        private static void ReplayAccepted(PendingRequest pending)
-        {
-            ApplyAccepted(pending);
-            Charge(pending.Spent);
+                WorldClientBehaviour.CancelPendingClientDeliveries(pending.AppendedDeliveries);
+                throw;
+            }
         }
 
         private bool CanCapture(string action)
@@ -672,18 +650,6 @@ namespace CardShopCoop.Modules.Purchasing
             // rejection must refund that local debit through the game's own coin event so the
             // balance is right immediately rather than until the next authoritative wallet delta.
             Refund(pending.Spent);
-        }
-
-        /// <summary>Re-applies the wallet debit of a replayed checkout through the game's own coin
-        /// event. Queued during reconciliation, so the Hud economy observer does not forward it as a
-        /// second contribution.</summary>
-        private static void Charge(double amount)
-        {
-            if (amount > 0.0001d)
-            {
-                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin((float)amount));
-            }
-
         }
 
         /// <summary>Reverses the wallet debit of a rejected checkout through the game's own coin

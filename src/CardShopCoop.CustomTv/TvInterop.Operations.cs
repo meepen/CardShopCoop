@@ -8,9 +8,9 @@ namespace CardShopCoop.CustomTv
 {
     internal static partial class TvInterop
     {
-        /// <summary>Applies one ActionMessage on the peer that owns the command (the host for a
-        /// client intent, or the client when a newer authoritative value replays a local follower).
-        /// Throws on refusal so the action framework rolls the sender back.</summary>
+        /// <summary>Applies one TV command on the host, which owns the command. The client already
+        /// ran the same game path as its prediction. Throws on refusal so the host can answer the
+        /// action as rejected.</summary>
         internal static void ApplyOp(InteractableObject tv, TvOperation operation, string url,
             string title, double value)
         {

@@ -80,7 +80,7 @@ namespace CardShopCoop.Modules.StoreAccess
         internal bool ApplyingIntent => _applyingIntent;
 
         [IntentValidator]
-        private IntentValidation ValidateToggle(CoopMessageContext context,
+        private IntentValidation ValidateToggle(MessageContext context,
             StoreAccessToggleIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -109,7 +109,7 @@ namespace CardShopCoop.Modules.StoreAccess
         }
 
         [IntentRejected]
-        private void ToggleRejected(CoopMessageContext context, StoreAccessToggleIntent message,
+        private void ToggleRejected(MessageContext context, StoreAccessToggleIntent message,
             string reason)
         {
             if (_shutdown || context?.Connection == null || message == null)
@@ -123,7 +123,7 @@ namespace CardShopCoop.Modules.StoreAccess
         }
 
         [MessageHandler]
-        private ActionOutcome HandleToggle(CoopMessageContext context,
+        private ActionOutcome HandleToggle(MessageContext context,
             StoreAccessToggleIntent message)
         {
             if (message == null)
@@ -131,7 +131,6 @@ namespace CardShopCoop.Modules.StoreAccess
                 return ActionOutcome.Reject("access sign command is missing");
             }
 
-            message.OnApply();
             if (_shutdown || context?.Connection == null)
             {
                 return ActionOutcome.Reject("access sign session is not active");

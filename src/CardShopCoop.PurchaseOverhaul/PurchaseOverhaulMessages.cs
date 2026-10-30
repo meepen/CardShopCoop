@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -14,14 +13,8 @@ namespace CardShopCoop.PurchaseOverhaul
         public List<string> ProductIds = new();
         public List<int> Boxes = new();
 
-        public PurchaseOrderRequest()
-        {
-            ActionKey = Guid.NewGuid().ToString("N");
-        }
-
-        public override void OnUndo(ActionResponseMessage response)
-            => PurchaseOverhaulClientBehaviour.Active?.CompleteOrder(response);
-
+        /// <summary>The client never charges its own wallet, so there is no prediction to
+        /// reverse. The host's answer is settled in <see cref="OnMerge"/>.</summary>
         public override void OnMerge(ActionResponseMessage response)
             => PurchaseOverhaulClientBehaviour.Active?.CompleteOrder(response);
     }
@@ -45,14 +38,8 @@ namespace CardShopCoop.PurchaseOverhaul
     {
         public string ProductId = "";
 
-        public PurchaseLicenseRequest()
-        {
-            ActionKey = Guid.NewGuid().ToString("N");
-        }
-
-        public override void OnUndo(ActionResponseMessage response)
-            => PurchaseOverhaulClientBehaviour.Active?.CompleteLicense(response);
-
+        /// <summary>The client never unlocks its own licence, so there is no prediction to
+        /// reverse. The host's answer is settled in <see cref="OnMerge"/>.</summary>
         public override void OnMerge(ActionResponseMessage response)
             => PurchaseOverhaulClientBehaviour.Active?.CompleteLicense(response);
     }

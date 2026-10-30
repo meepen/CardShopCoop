@@ -12,15 +12,15 @@ namespace CardShopCoop.Modules.Pricing
         public EItemType ItemType;
         public float Price;
 
-        /// <summary>The client's ledger replay/undo closures own the prediction; the message is
-        /// only the host command.</summary>
-        public override void OnApply()
-        {
-        }
+        /// <summary>The item price before the local change. Local undo state; not serialized.</summary>
+        [NonSerialized]
+        public float Previous;
 
         public override void OnUndo(ActionResponseMessage response)
-        {
-        }
+            => PricingClientBehaviour.Active?.UndoItem(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => PricingClientBehaviour.Active?.MergeItem(this, response);
     }
 
     [NetworkMessage]
@@ -37,15 +37,34 @@ namespace CardShopCoop.Modules.Pricing
         /// <summary>Index of the compartment in the shelf's GetCardCompartmentList().</summary>
         public int Compartment;
 
-        /// <summary>The client's ledger replay/undo closures own the prediction; the message is
-        /// only the host command.</summary>
-        public override void OnApply()
-        {
-        }
+        /// <summary>The card price before the local change. Local undo state; not serialized.</summary>
+        [NonSerialized]
+        public float Previous;
 
         public override void OnUndo(ActionResponseMessage response)
-        {
-        }
+            => PricingClientBehaviour.Active?.UndoCard(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => PricingClientBehaviour.Active?.MergeCard(this, response);
+    }
+
+    /// <summary>The host's absolute item price after one intent. <see cref="Price"/> is
+    /// <see cref="float.NaN"/> when the host has no authoritative value to send.</summary>
+    [NetworkMessage]
+    public sealed class PricingItemResponse : ActionResponseMessage
+    {
+        public EItemType ItemType;
+        public float Price = float.NaN;
+    }
+
+    /// <summary>The host's absolute card price after one intent. <see cref="Price"/> is
+    /// <see cref="float.NaN"/> when the host has no authoritative value to send.</summary>
+    [NetworkMessage]
+    public sealed class PricingCardResponse : ActionResponseMessage
+    {
+        public CardData Card;
+        public int EncodedGrade;
+        public float Price = float.NaN;
     }
 
     /// <summary>One host-owned pricing snapshot. The newest received snapshot replaces the old one.</summary>
@@ -62,7 +81,6 @@ namespace CardShopCoop.Modules.Pricing
     /// <summary>One item price change inside a <see cref="PricingDeltaBatchMessage"/>.</summary>
     public struct PricingItemDeltaEntry
     {
-        public Guid ActionId;
         public EItemType ItemType;
         public float Price;
     }
@@ -71,18 +89,16 @@ namespace CardShopCoop.Modules.Pricing
     /// snapshotted when the entry is queued, never when the batch is flushed.</summary>
     public struct PricingCardDeltaEntry
     {
-        public Guid ActionId;
         public CardData Card;
         public float Price;
         public int EncodedGrade;
         public bool Removed;
     }
 
-    /// <summary>Every pricing change produced in one frame, in apply order. One message per frame
-    /// replaces the old one-message-per-change deltas so a mass price update (bulk reprice, a
-    /// day-start automation pass) cannot overflow a peer's bounded outbound queue. The entries are
-    /// append-only and each keeps its own prediction id: a later same-key entry must not swallow an
-    /// earlier prediction-bearing one, or the peer that recorded it never reconciles.</summary>
+    /// <summary>Every host-originated pricing change produced in one frame, in apply order. One
+    /// message per frame replaces the old one-message-per-change deltas so a mass price update
+    /// (bulk reprice, a day-start automation pass) cannot overflow a peer's bounded outbound
+    /// queue. A guest's own intent is answered by its <see cref="ActionResponseMessage"/>.</summary>
     [NetworkMessage]
     public sealed class PricingDeltaBatchMessage : INetMessage
     {

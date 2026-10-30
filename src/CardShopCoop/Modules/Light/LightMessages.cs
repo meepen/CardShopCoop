@@ -5,30 +5,45 @@ using UnityEngine;
 
 namespace CardShopCoop.Modules.Light
 {
-    /// <summary>Host-owned shop-light state. State, not a command: the host owns every toggle.
-    /// <see cref="ActionId"/> retires the toggle prediction this absolute answers.</summary>
+    /// <summary>Host-owned shop-light state. State, not a command: the host owns every toggle and
+    /// publishes the resulting flag to the other peers.</summary>
     [NetworkMessage]
     public sealed class LightSwitchStateMessage : INetMessage
     {
-        public Guid ActionId;
         public bool IsActive;
     }
 
-    /// <summary>Client command: set the shared shop-light flag. The prediction is recorded by the
-    /// client's action-ledger closures (they capture the prior flag for the undo), so the
-    /// framework hooks stay empty.</summary>
+    /// <summary>Client command: set the shared shop-light flag. The game already toggled the
+    /// light locally, so <see cref="OnUndo"/> restores the captured prior flag and
+    /// <see cref="OnMerge"/> applies the host's absolute answer.</summary>
     [NetworkMessage]
     public sealed class LightSwitchIntentMessage : ActionMessage
     {
         public bool IsActive;
 
-        public override void OnApply()
-        {
-        }
+        /// <summary>The shop-light flag before the local toggle. Local undo state; not
+        /// serialized.</summary>
+        [NonSerialized]
+        public bool Previous;
 
         public override void OnUndo(ActionResponseMessage response)
+            => LightSwitchState.Apply(Previous);
+
+        public override void OnMerge(ActionResponseMessage response)
         {
+            if (response is LightSwitchResponse answer)
+            {
+                LightSwitchState.Apply(answer.IsActive);
+            }
         }
+    }
+
+    /// <summary>The host's absolute shop-light flag after one toggle. The framework sets
+    /// <see cref="ActionResponseMessage.Rejected"/>; the flag is authoritative either way.</summary>
+    [NetworkMessage]
+    public sealed class LightSwitchResponse : ActionResponseMessage
+    {
+        public bool IsActive;
     }
 
     /// <summary>Applies the one shop-light flag through the game's live lighting surface.

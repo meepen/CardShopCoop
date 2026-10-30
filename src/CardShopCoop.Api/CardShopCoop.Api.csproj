@@ -9,7 +9,9 @@
     <Product>CardShopCoopCommunity.Api</Product>
     <Description>Public integration contract for CardShopCoopCommunity. Optional-dependency safe.</Description>
     <Authors>Devin 'Meepen' Korb</Authors>
-    <Version>$(CardShopCoopVersion)</Version>
+    <Version>$(CardShopCoopApiVersion)</Version>
+    <AssemblyVersion>$(CardShopCoopApiVersion)</AssemblyVersion>
+    <FileVersion>$(CardShopCoopApiVersion)</FileVersion>
     <LangVersion>9</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>

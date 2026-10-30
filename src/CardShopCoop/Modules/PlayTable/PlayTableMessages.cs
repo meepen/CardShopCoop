@@ -20,8 +20,6 @@ namespace CardShopCoop.Modules.PlayTable
         public const byte TableUpsert = 1;
         public const byte TableRemove = 2;
         public const byte SeatUpdate = 3;
-        /// <summary>The prediction this delta answers, or empty for host-local table state.</summary>
-        public Guid ActionId;
         public byte Operation;
         /// <summary>The live table this visual state describes.</summary>
         public InteractablePlayTable Table;
@@ -38,13 +36,24 @@ namespace CardShopCoop.Modules.PlayTable
     {
         public const byte Upsert = 1;
         public const byte Release = 2;
-        /// <summary>The prediction this delta answers, or empty for host-local match state.</summary>
-        public Guid ActionId;
         public byte Operation;
         public string MatchId;
         /// <summary>The live table the match lease belongs to.</summary>
         public InteractablePlayTable Table;
         public PlayTableMatchEntry Match;
+    }
+
+    /// <summary>The acting client's authoritative table/match state after one predicted action.</summary>
+    [NetworkMessage]
+    public sealed class PlayTableActionResponse : ActionResponseMessage
+    {
+        public InteractablePlayTable Table;
+        /// <summary>The host's post-action table visual entry, or null when the table is gone.</summary>
+        public PlayTableEntry Entry;
+        /// <summary>The host's match lease for the table, or null when none.</summary>
+        public PlayTableMatchEntry Match;
+        /// <summary>True when the action released the table's match lease.</summary>
+        public bool MatchRemoved;
     }
 
     /// <summary>A client request to reserve the requested seat for a new match lease.</summary>
@@ -57,50 +66,27 @@ namespace CardShopCoop.Modules.PlayTable
         public byte Seat;
         public bool SideA;
         public int DeckCardCount;
+        /// <summary>True when vanilla already entered the reserved game, so the host publishes
+        /// the lease as started rather than merely reserved.</summary>
+        public bool Started;
 
-        // The client registers this prediction through the explicit Apply/Undo closures in
-        // PlayTableClientBehaviour, and the host handler performs the reservation itself, so the
-        // action hooks are never the applied path.
-        public override void OnApply()
-        {
-        }
+        [NonSerialized]
+        internal PlayTableClientBehaviour Client;
 
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
-    }
-
-    /// <summary>A client request to drop its reserved lease before the match starts.</summary>
-    [NetworkMessage]
-    public sealed class CancelTableMatchIntent : ActionMessage
-    {
-        public string MatchId;
-        /// <summary>The live table the lease belongs to.</summary>
-        public InteractablePlayTable Table;
-
-        public override void OnApply()
-        {
-        }
+        [NonSerialized]
+        internal PlayTableClientBehaviour.LaunchState Launch;
 
         public override void OnUndo(ActionResponseMessage response)
         {
-        }
-    }
-
-    /// <summary>A client notification that vanilla already entered the reserved game.</summary>
-    [NetworkMessage]
-    public sealed class MarkTableMatchStartedIntent : ActionMessage
-    {
-        public string MatchId;
-        /// <summary>The live table the lease belongs to.</summary>
-        public InteractablePlayTable Table;
-
-        public override void OnApply()
-        {
+            Client?.UndoLaunch(Table, Launch);
         }
 
-        public override void OnUndo(ActionResponseMessage response)
+        public override void OnMerge(ActionResponseMessage response)
         {
+            var client = Client;
+            Client = null;
+            Launch = null;
+            client?.ApplyResponse(response);
         }
     }
 
@@ -112,12 +98,23 @@ namespace CardShopCoop.Modules.PlayTable
         /// <summary>The live table the lease belongs to.</summary>
         public InteractablePlayTable Table;
 
-        public override void OnApply()
-        {
-        }
+        [NonSerialized]
+        internal PlayTableClientBehaviour Client;
+
+        [NonSerialized]
+        internal PlayTableClientBehaviour.LaunchState Launch;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            Client?.RestoreReleased(Launch);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            var client = Client;
+            Client = null;
+            Launch = null;
+            client?.ApplyResponse(response);
         }
     }
 
@@ -128,12 +125,23 @@ namespace CardShopCoop.Modules.PlayTable
         /// <summary>The live table the kick targets; never a list index or placement key.</summary>
         public InteractablePlayTable Table;
 
-        public override void OnApply()
-        {
-        }
+        [NonSerialized]
+        internal PlayTableClientBehaviour Client;
+
+        [NonSerialized]
+        internal PlayTableEntry Before;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            Client?.RestoreEntry(Table, Before);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            var client = Client;
+            Client = null;
+            Before = null;
+            client?.ApplyResponse(response);
         }
     }
 

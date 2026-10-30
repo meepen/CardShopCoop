@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
@@ -16,7 +15,9 @@ namespace CardShopCoop.Modules.Presence
     {
         private const int MaxCustomizationJson = 512 * 1024;
         private static PresenceHostBehaviour _active;
-        private readonly HashSet<int> _joined = new();
+        // Canonical player id -> the peer that sends/receives for it. The id is wire payload
+        // identity for the roster and model entries; sends always address the peer handle.
+        private readonly Dictionary<int, ICoopPeer> _joined = new();
         private readonly Dictionary<int, PresenceModelEntry> _models = new();
         private readonly Dictionary<int, PresenceStateMessage> _latestStates = new();
         private readonly Dictionary<int, PresenceHoldMessage> _latestHolds = new();
@@ -63,20 +64,22 @@ namespace CardShopCoop.Modules.Presence
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
-            if (_shutdown || connection == null)
+            var peer = PeerHandle.ForConnection(connection);
+            if (_shutdown || peer == null)
             {
                 return;
             }
 
-            _joined.Add(connection.Id);
-            ApplyPeerName(connection.Id);
-            SendBaseline(connection.Id);
-            BroadcastRosterDelta(new PresenceRosterDeltaMessage
+            var id = PeerId(peer);
+            _joined[id] = peer;
+            ApplyPeerName(id);
+            SendBaseline(peer);
+            SendToJoined(new PresenceRosterDeltaMessage
             {
                 Kind = PresenceEntityDeltaKind.Add,
-                Id = connection.Id,
-                Entry = BuildRosterEntry(connection.Id),
-            }, connection.Id);
+                Id = id,
+                Entry = BuildRosterEntry(id),
+            }, peer);
             PresenceApi.NotifyRosterChanged();
         }
 
@@ -88,22 +91,22 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            _joined.Remove(connection.Id);
-            _models.Remove(connection.Id);
-            _latestStates.Remove(connection.Id);
-            _latestHolds.Remove(connection.Id);
-            RuntimeContext.PeerPresence.Clear(connection.Id);
-            _service?.Remove(connection.Id);
-            BroadcastRosterDelta(new PresenceRosterDeltaMessage
+            var id = connection.Id;
+            _joined.Remove(id);
+            _models.Remove(id);
+            _latestStates.Remove(id);
+            _latestHolds.Remove(id);
+            RuntimeContext.PeerPresence.Clear(id);
+            _service?.Remove(id);
+            SendToJoined(new PresenceRosterDeltaMessage
             {
                 Kind = PresenceEntityDeltaKind.Remove,
-                Id = connection.Id,
+                Id = id,
             });
-            BroadcastModelDelta(new PresenceModelDeltaMessage
+            SendToJoined(new PresenceModelDeltaMessage
             {
                 Kind = PresenceEntityDeltaKind.Remove,
-                Id = connection.Id,
-                ActionId = Guid.Empty,
+                Id = id,
             });
             PresenceApi.NotifyRosterChanged();
         }
@@ -111,117 +114,139 @@ namespace CardShopCoop.Modules.Presence
         [MessageHandler]
         private void HandleState(MessageContext context, PresenceStateMessage message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            var peer = context?.Peer;
+            if (message == null || !IsAuthenticatedSender(peer, context?.IsAuthenticated == true))
             {
                 return;
             }
 
-            RuntimeContext.PeerPresence.RecordAuthenticatedPosition(context.Connection, message.Position);
-            _service.ApplyState(context.Connection.Id, message);
-            _latestStates[context.Connection.Id] = CloneState(message);
-
-            var relay = new PresenceRelayStateMessage
+            var id = PeerId(peer);
+            RuntimeContext.PeerPresence.RecordAuthenticatedPosition(peer, message.Position);
+            _service.ApplyState(id, message);
+            _latestStates[id] = CloneState(message);
+            SendToJoined(new PresenceRelayStateMessage
             {
-                SenderId = context.Connection.Id,
+                SenderId = id,
                 State = CloneState(message),
-            };
-            foreach (var connectionId in ConnectionIds())
-            {
-                if (connectionId != context.Connection.Id && _joined.Contains(connectionId))
-                {
-                    RuntimeContext.Send(connectionId, relay);
-                }
-            }
+            }, peer);
         }
 
         [MessageHandler]
         private void HandleHold(MessageContext context, PresenceHoldMessage message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            var peer = context?.Peer;
+            if (message == null || !IsAuthenticatedSender(peer, context?.IsAuthenticated == true))
             {
                 return;
             }
 
-            RuntimeContext.PeerPresence.RecordAuthenticatedHold(context.Connection, message.Hold,
+            var id = PeerId(peer);
+            RuntimeContext.PeerPresence.RecordAuthenticatedHold(peer, message.Hold,
                 message.HoldTypes);
-            _service.ApplyHold(context.Connection.Id, message);
-            _latestHolds[context.Connection.Id] = CloneHold(message);
-
-            var relay = new PresenceRelayHoldMessage
+            _service.ApplyHold(id, message);
+            _latestHolds[id] = CloneHold(message);
+            SendToJoined(new PresenceRelayHoldMessage
             {
-                SenderId = context.Connection.Id,
+                SenderId = id,
                 Hold = CloneHold(message),
-            };
-            foreach (var connectionId in ConnectionIds())
-            {
-                if (connectionId != context.Connection.Id && _joined.Contains(connectionId))
-                {
-                    RuntimeContext.Send(connectionId, relay);
-                }
-            }
+            }, peer);
         }
 
         [MessageHandler]
-        private ActionOutcome HandleModelRequest(MessageContext context,
+        private ActionOutcome HandleModelRequest(CoopMessageContext context,
             PresenceModelRequestMessage message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            var peer = context?.Peer;
+            if (message == null || !IsAuthenticatedSender(peer, context?.IsAuthenticated == true))
             {
                 return ActionOutcome.Reject("appearance request from an unauthenticated sender");
             }
 
             if (message.ModelIndex < 0 || message.CustomizationJson?.Length > MaxCustomizationJson)
             {
-                return ActionOutcome.Reject("appearance payload is outside the allowed range");
+                return RejectModel(peer, "appearance payload is outside the allowed range");
             }
 
-            var kind = _models.ContainsKey(context.Connection.Id)
+            var id = PeerId(peer);
+            var kind = _models.ContainsKey(id)
                 ? PresenceEntityDeltaKind.Update
                 : PresenceEntityDeltaKind.Add;
 
             var model = new PresenceModelEntry
             {
-                Id = context.Connection.Id,
+                Id = id,
                 Female = message.Female,
                 ModelIndex = message.ModelIndex,
                 CustomizationJson = message.CustomizationJson,
             };
-            _models[context.Connection.Id] = Clone(model);
-            _service.SetModel(context.Connection.Id, model);
-            CoopPlugin.Log.LogInfo("appearance update from player " + context.Connection.Id + ": "
+            _models[id] = Clone(model);
+            _service.SetModel(id, model);
+            CoopPlugin.Log.LogInfo("appearance update from player " + id + ": "
                 + (model.Female ? "female" : "male") + " " + model.ModelIndex);
-            BroadcastModelDelta(new PresenceModelDeltaMessage
+            SendToJoined(new PresenceModelDeltaMessage
             {
                 Kind = kind,
-                Id = context.Connection.Id,
+                Id = id,
                 Entry = Clone(model),
-                ActionId = message.ActionId,
+            }, peer);
+            return ActionOutcome.Applied(new PresenceModelResponseMessage
+            {
+                Entry = Clone(model),
             });
-            return ActionOutcome.Applied();
+        }
+
+        /// <summary>Answers a refused appearance intent with the host's current appearance for
+        /// the actor, if the host has one. The client's undo stands when it has none.</summary>
+        private ActionOutcome RejectModel(ICoopPeer peer, string reason)
+        {
+            var id = PeerId(peer);
+            if (_models.TryGetValue(id, out var stored) && stored != null)
+            {
+                return ActionOutcome.Reject(reason, new PresenceModelResponseMessage
+                {
+                    Entry = Clone(stored),
+                });
+            }
+
+            return ActionOutcome.Reject(reason);
         }
 
         [MessageHandler]
         private void HandleEmote(MessageContext context, PresenceEmoteMessage message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            var peer = context?.Peer;
+            if (message == null || !IsAuthenticatedSender(peer, context?.IsAuthenticated == true))
             {
                 return;
             }
 
-            _service.ShowEmote(context.Connection.Id);
-            RelayTag(context.Connection.Id, 0, default(EItemType));
+            var id = PeerId(peer);
+            _service.ShowEmote(id);
+            SendToJoined(new PresenceRelayTagMessage
+            {
+                SenderId = id,
+                Kind = 0,
+                Extra = default(EItemType),
+            }, peer);
         }
 
         [MessageHandler]
         private void HandleActivity(MessageContext context, PresenceActivityMessage message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            var peer = context?.Peer;
+            if (message == null || !IsAuthenticatedSender(peer, context?.IsAuthenticated == true))
             {
                 return;
             }
 
-            _service.ShowActivity(context.Connection.Id, (int)message.Pack);
-            RelayTag(context.Connection.Id, 1, message.Pack);
+            var id = PeerId(peer);
+            _service.ShowActivity(id, (int)message.Pack);
+            SendToJoined(new PresenceRelayTagMessage
+            {
+                SenderId = id,
+                Kind = 1,
+                Extra = message.Pack,
+            }, peer);
         }
 
         internal bool TryGetPeerPresence(int connectionId, out PeerPresence presence)
@@ -246,13 +271,13 @@ namespace CardShopCoop.Modules.Presence
         }
 
         /// <summary>The session roster for the window: this host first, then each joined peer in id
-        /// order. Ids are the host's canonical connection ids (0 is this host).</summary>
+        /// order. Ids are the host's canonical player ids (0 is this host).</summary>
         internal IReadOnlyList<PresencePlayer> BuildPlayers()
         {
             var players = new List<PresencePlayer>(_joined.Count + 1);
             players.Add(new PresencePlayer(0, PresenceApi.LocalPlayerName, true, true));
 
-            var ids = new List<int>(_joined);
+            var ids = new List<int>(_joined.Keys);
             ids.Sort();
             for (var i = 0; i < ids.Count; i++)
             {
@@ -288,27 +313,29 @@ namespace CardShopCoop.Modules.Presence
             _joined.Clear();
             _models.Clear();
             _latestStates.Clear();
+            _latestHolds.Clear();
         }
 
         private void OnDestroy() => Shutdown();
 
-        private void SendBaseline(int connectionId)
+        private void SendBaseline(ICoopPeer peer)
         {
-            RuntimeContext.Send(connectionId, BuildRoster(connectionId));
-            RuntimeContext.Send(connectionId, BuildModelState());
+            var id = PeerId(peer);
+            peer.Send(BuildRoster(id));
+            peer.Send(BuildModelState());
             if (_latestStates.TryGetValue(0, out var hostState))
             {
-                RuntimeContext.Send(connectionId, CloneState(hostState));
+                peer.Send(CloneState(hostState));
             }
 
             foreach (var pair in _latestStates)
             {
-                if (pair.Key == 0 || pair.Key == connectionId || !_joined.Contains(pair.Key))
+                if (pair.Key == 0 || pair.Key == id || !_joined.ContainsKey(pair.Key))
                 {
                     continue;
                 }
 
-                RuntimeContext.Send(connectionId, new PresenceRelayStateMessage
+                peer.Send(new PresenceRelayStateMessage
                 {
                     SenderId = pair.Key,
                     State = CloneState(pair.Value),
@@ -317,17 +344,17 @@ namespace CardShopCoop.Modules.Presence
 
             if (_latestHolds.TryGetValue(0, out var hostHold))
             {
-                RuntimeContext.Send(connectionId, CloneHold(hostHold));
+                peer.Send(CloneHold(hostHold));
             }
 
             foreach (var pair in _latestHolds)
             {
-                if (pair.Key == 0 || pair.Key == connectionId || !_joined.Contains(pair.Key))
+                if (pair.Key == 0 || pair.Key == id || !_joined.ContainsKey(pair.Key))
                 {
                     continue;
                 }
 
-                RuntimeContext.Send(connectionId, new PresenceRelayHoldMessage
+                peer.Send(new PresenceRelayHoldMessage
                 {
                     SenderId = pair.Key,
                     Hold = CloneHold(pair.Value),
@@ -346,12 +373,12 @@ namespace CardShopCoop.Modules.Presence
 
             _stateTimer = 0f;
             _latestStates[0] = CloneState(state);
-            RuntimeContext.Broadcast(state);
+            SendToJoined(state);
             PublishLocalHold();
         }
 
-        /// <summary>Broadcasts the host's hold appearance only when it changes, on the reliable
-        /// lane. The 15 Hz transform broadcast stays fixed-size.</summary>
+        /// <summary>Sends the host's hold appearance only when it changes, on the reliable lane.
+        /// The 15 Hz transform stream stays fixed-size.</summary>
         private void PublishLocalHold()
         {
             if (!_service.TryConsumeLocalHoldChange(out var hold))
@@ -360,7 +387,7 @@ namespace CardShopCoop.Modules.Presence
             }
 
             _latestHolds[0] = CloneHold(hold);
-            RuntimeContext.Broadcast(hold);
+            SendToJoined(hold);
         }
 
         private void OnLocalModelChanged(PresenceModelEntry model)
@@ -374,12 +401,11 @@ namespace CardShopCoop.Modules.Presence
             _models[0] = Clone(model);
             if (RuntimeContext.InGame())
             {
-                BroadcastModelDelta(new PresenceModelDeltaMessage
+                SendToJoined(new PresenceModelDeltaMessage
                 {
                     Kind = PresenceEntityDeltaKind.Update,
                     Id = 0,
                     Entry = Clone(model),
-                    ActionId = Guid.Empty,
                 });
             }
         }
@@ -403,17 +429,12 @@ namespace CardShopCoop.Modules.Presence
         private PresenceRosterMessage BuildRoster(int selfId = 0)
         {
             var message = new PresenceRosterMessage { SelfId = selfId };
-            var ids = ConnectionIds();
+            var ids = new List<int>(_joined.Keys);
+            ids.Sort();
             for (var i = 0; i < ids.Count; i++)
             {
                 var id = ids[i];
-                if (!_joined.Contains(id))
-                {
-                    continue;
-                }
-
-                var name = RuntimeContext.PeerName?.Invoke(id);
-                message.Entries.Add(BuildRosterEntry(id, name));
+                message.Entries.Add(BuildRosterEntry(id));
             }
 
             return message;
@@ -435,69 +456,42 @@ namespace CardShopCoop.Modules.Presence
         /// view of a remote player falls back to "Player" even though the roster and HUD know the
         /// real name. The name is captured once at join, before any state is admitted, matching
         /// the wire lifetime of a peer name.</summary>
-        private void ApplyPeerName(int connectionId)
+        private void ApplyPeerName(int id)
         {
-            var name = RuntimeContext.PeerName?.Invoke(connectionId);
+            var name = RuntimeContext.PeerName?.Invoke(id);
             if (!string.IsNullOrEmpty(name))
             {
-                _service.SetName(connectionId, name);
+                _service.SetName(id, name);
             }
         }
 
-        private void BroadcastRosterDelta(PresenceRosterDeltaMessage delta,
-            int excludedConnectionId = -1)
-        {
-            if (!_shutdown)
-            {
-                foreach (var connectionId in ConnectionIds())
-                {
-                    if (connectionId != excludedConnectionId && _joined.Contains(connectionId))
-                    {
-                        RuntimeContext.Send(connectionId, delta);
-                    }
-                }
-            }
-        }
-
-        private void BroadcastModelDelta(PresenceModelDeltaMessage delta,
-            int excludedConnectionId = -1)
+        /// <summary>Sends to every other joined peer through its handle. Presence is advisory
+        /// state, so only peers that already completed their baseline receive stream updates.</summary>
+        private void SendToJoined(INetMessage message, ICoopPeer except = null)
         {
             if (_shutdown)
             {
                 return;
             }
 
-            foreach (var connectionId in ConnectionIds())
+            foreach (var peer in _joined.Values)
             {
-                if (connectionId != excludedConnectionId && _joined.Contains(connectionId))
+                if (except != null && peer.Equals(except))
                 {
-                    RuntimeContext.Send(connectionId, delta);
+                    continue;
                 }
+
+                peer.Send(message);
             }
         }
 
-        private void RelayTag(int senderId, byte kind, EItemType extra)
-        {
-            var tag = new PresenceRelayTagMessage { SenderId = senderId, Kind = kind, Extra = extra };
-            foreach (var connectionId in ConnectionIds())
-            {
-                if (connectionId != senderId && _joined.Contains(connectionId))
-                {
-                    RuntimeContext.Send(connectionId, tag);
-                }
-            }
-        }
+        private static int PeerId(ICoopPeer peer)
+            => peer is PeerHandle handle ? handle.CanonicalId : peer?.Player?.Id ?? 0;
 
-        private bool IsAuthenticatedSender(MessageContext context)
+        private bool IsAuthenticatedSender(ICoopPeer peer, bool authenticated)
         {
-            return !_shutdown && RuntimeContext.InGame()
-                && context?.Connection != null && _joined.Contains(context.Connection.Id)
-                && context.IsAuthenticated;
-        }
-
-        private IReadOnlyList<int> ConnectionIds()
-        {
-            return RuntimeContext.ConnectionIds?.Invoke() ?? new List<int>();
+            return !_shutdown && RuntimeContext.InGame() && authenticated && peer != null
+                && _joined.ContainsKey(PeerId(peer));
         }
 
         private static PresenceStateMessage CloneState(PresenceStateMessage state)

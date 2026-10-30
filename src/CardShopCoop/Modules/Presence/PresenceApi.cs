@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System;
 using CardShopCoop.Api;
+using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using UnityEngine;
@@ -89,12 +90,15 @@ namespace CardShopCoop.Modules.Presence
             NotifyRosterChanged();
         }
 
-        /// <summary>Copies the session's normalized name onto the public connection object.</summary>
+        /// <summary>Copies the session's normalized name onto the public connection object and
+        /// refreshes the peer identity every view reads (<see cref="ICoopPeer.Player"/>,
+        /// <see cref="ICoopPeer.IsHost"/>, <see cref="ICoopPeer.IsSelf"/>).</summary>
         internal static void ApplyName(PeerConnection connection)
         {
             if (connection != null)
             {
                 connection.Name = PeerName(connection.Id);
+                PeerHandle.BindIdentity(connection);
             }
         }
 

@@ -4,8 +4,8 @@ namespace CardShopCoop.Api
     /// One change notification for a global or object information value. <see cref="Previous"/> is
     /// null for the first value and for a join baseline; <see cref="Current"/> is null when the
     /// entry was removed. When <see cref="Current"/> is an <see cref="IActionValue"/>, the
-    /// framework applies its action id around the handler for both this change form and the raw
-    /// value form.
+    /// framework applies it before the action's <see cref="ActionMessage.OnMerge"/> runs with a
+    /// null response, so the value is the authoritative merge state.
     /// </summary>
     public readonly struct InformationChange<T> where T : class
     {

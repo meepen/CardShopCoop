@@ -4,7 +4,6 @@ using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -69,7 +68,10 @@ namespace CardShopCoop.Modules.Decoration
 
 
             _fullyJoined.Add(connection.Id);
-            SendState(connection.Id);
+            if (TryBuildState(out var state))
+            {
+                PeerHandle.ForConnection(connection)?.Send(state);
+            }
         }
 
         [OnClientDisconnected]
@@ -123,33 +125,24 @@ namespace CardShopCoop.Modules.Decoration
                 var delta = BuildDelta(message);
                 if (delta != null)
                 {
-                    BroadcastDelta(delta);
+                    BroadcastDelta(delta, message.Peer);
                 }
                 // The module drives the local screens with a temporarily selected category, so the
                 // host's open deco screen can be left rendering another category's panels. Refresh
                 // it from the authoritative values the apply just produced.
 
                 DecorationInterop.RefreshUi();
-                return ActionOutcome.Applied();
+                return ActionOutcome.Applied(new DecorationIntentResponse { Delta = delta });
             }
 
-            if (message.ActionId != Guid.Empty)
-            {
-                CoopPlugin.Log.LogInfo("[decoration] intent rejected action=" + message.Action
-                    + " type=" + message.DecorationType + " prediction=" + message.ActionId + ".");
-                // The rollback's undo restores the requester's captured snapshot, which may be
-                // stale if the host or another guest changed the decorations during the round
-                // trip. DecorationStateMessage cannot carry the prediction id, so the
-                // authoritative snapshot follows the rollback: the undo runs first and the state
-                // then overrides it on the same reliable lane. Because the state - not the
-                // framework's generic rollback - settles this prediction, report the command as
-                // already applied so no second rollback lands after the authority.
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
-                SendState(context.Connection.Id);
-                return ActionOutcome.Applied();
-            }
-
-            return ActionOutcome.Reject("decoration action was refused");
+            CoopPlugin.Log.LogInfo("[decoration] intent rejected action=" + message.Action
+                + " type=" + message.DecorationType + " prediction=" + message.ActionId + ".");
+            // The requester's undo restores its captured snapshot, which may be stale if the host
+            // or another guest changed the decorations during the round trip. The authoritative
+            // snapshot travels in the rejection response and is applied after that undo.
+            TryBuildState(out var state);
+            return ActionOutcome.Reject("decoration action was refused",
+                new DecorationIntentResponse { State = state });
         }
 
         private static bool ApplyIntent(DecorationIntentMessage message)
@@ -318,27 +311,21 @@ namespace CardShopCoop.Modules.Decoration
             return false;
         }
 
-        private void BroadcastDelta(DecorationDeltaMessage message)
+        private void BroadcastDelta(DecorationDeltaMessage message, ICoopPeer except = null)
         {
             if (_shutdown || !RuntimeContext.InGame() || message == null)
             {
                 return;
             }
 
-
-            RuntimeContext.Broadcast(message);
-        }
-
-        private void SendState(int peer)
-        {
-            if (_shutdown || !RuntimeContext.InGame()
-                || !TryBuildState(out var state))
+            if (except != null)
             {
-                return;
+                Context.BroadcastExcept(except, message);
             }
-
-
-            RuntimeContext.Send(peer, state);
+            else
+            {
+                Context.Broadcast(message);
+            }
         }
 
         private bool TryBuildState(out DecorationStateMessage message)
@@ -374,7 +361,6 @@ namespace CardShopCoop.Modules.Decoration
 
             BroadcastDelta(new DecorationDeltaMessage
             {
-                ActionId = Guid.Empty,
                 Action = action,
                 DecorationType = type,
                 InventoryCount = DecorationInterop.InventoryCount(type),
@@ -386,7 +372,6 @@ namespace CardShopCoop.Modules.Decoration
         {
             var delta = new DecorationDeltaMessage
             {
-                ActionId = intent.ActionId,
                 Action = intent.Action,
                 Category = intent.Category,
                 Index = intent.Index,
@@ -448,7 +433,6 @@ namespace CardShopCoop.Modules.Decoration
                     Category = DecorationInterop.CategoryFor(__instance),
                     Index = shopDecoIndex,
                     LotB = isShopLotB,
-                    ActionId = Guid.Empty,
                 });
             }
         }
@@ -492,7 +476,6 @@ namespace CardShopCoop.Modules.Decoration
                     Action = DecorationActions.BuyShopDecoration,
                     Category = __state.Category,
                     Index = shopDecoIndex,
-                    ActionId = Guid.Empty,
                 });
             }
         }
@@ -514,7 +497,6 @@ namespace CardShopCoop.Modules.Decoration
                     Action = DecorationActions.BuyItemDecoration,
                     DecorationType = itemType,
                     InventoryCount = DecorationInterop.InventoryCount(itemType),
-                    ActionId = Guid.Empty,
                 });
             }
         }

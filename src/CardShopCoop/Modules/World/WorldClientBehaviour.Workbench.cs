@@ -1,5 +1,3 @@
-using System;
-using CardShopCoop.Modules.Actions;
 using System.Collections.Generic;
 using CardShopCoop.Net;
 using HarmonyLib;
@@ -12,7 +10,8 @@ namespace CardShopCoop.Modules.World
 
         private void InstallWorkbench()
         {
-            _workbenchInteraction = new WorldWorkbenchInteraction(false, _ => { }, SendWorldCommand);
+            _workbenchInteraction = new WorldWorkbenchInteraction(false, _ => { },
+                (_, message) => Context.Send(message));
             Harmony.CreateClassProcessor(typeof(ClientWorkbenchAddItemPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(ClientWorkbenchRemoveItemPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(ClientWorkbenchTakeItemToHandPatch)).Patch();
@@ -49,22 +48,10 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            // The message carries the host's ABSOLUTE stored list. Reconcile it in layers so a
-            // concurrent host edit is folded (never drift) while an overlapping newer local edit on
-            // this bench is undone and replayed rather than transiently despawned by our echo of
-            // this list; an empty/unknown id still just applies.
-            if (message.ActionId == Guid.Empty
-                || !ActionLedger.IsPending(message.ActionId))
-            {
-                // A state nobody predicted supersedes every snapshot captured before it. A state
-                // that resolves one of our own edits must not: the sibling predictions whose undos
-                // the reconcile runs first still need their snapshots, and a follower rejected
-                // later must still be able to undo itself.
-                _workbenchInteraction?.MarkAuthorityAdvanced(message.Bench);
-            }
-
-            WorldAction.ApplyAuthoritative(message,
-                () => _workbenchInteraction?.ClientApplyState(message));
+            // The message carries the host's ABSOLUTE stored list. The acting client receives its
+            // own post-action state in the action response; this path is the unsolicited state
+            // from the host's own edits and from other peers' accepted actions.
+            _workbenchInteraction?.ClientApplyState(message);
         }
 
         /// <summary>Capture-only prefix: snapshot the bench's live stored list before the game's

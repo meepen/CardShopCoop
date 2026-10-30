@@ -86,14 +86,17 @@ namespace CardShopCoop.Modules.Deodorant
                 });
             }
 
-            RuntimeContext.Broadcast(new HandheldSprayEventMessage
+            RuntimeContext.BroadcastExcept(message.Peer, new HandheldSprayEventMessage
             {
-                ActionId = message.ActionId,
                 Position = message.Position,
                 Content = message.Content,
                 Customers = states,
             });
-            return ActionOutcome.Applied();
+            return ActionOutcome.Applied(new HandheldSprayResponseMessage
+            {
+                Content = message.Content,
+                Customers = states,
+            });
         }
 
         private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);

@@ -141,7 +141,7 @@ namespace CardShopCoop.Modules.Tournament
         [OnClientDisconnected]
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
-            if (connection?.Id == 1)
+            if (PeerHandle.ForConnection(connection)?.IsHost == true)
             {
                 ResetSessionState();
             }

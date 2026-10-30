@@ -53,7 +53,7 @@ owns the *process/window/input* layer, CardShopCoop owns the *session* layer, th
 | Connection setup path (address/lobby) | **CardShopCoop** | IP typed address (`ip` or `ip:port`), optional Steam lobby |
 | Join handshake (version / catalog / hash validation) | **CardShopCoop** | `CoopCore.HandleHello/HandleWelcome` (`CoopCore.cs:869-1102`); Steam-independent |
 | World transfer (host snapshot / guest borrowed world) | **CardShopCoop** | `Modules/SaveTransfer/*`; host slot 6, guest slot −100 |
-| Peer identity, roster, names, remote avatars | **CardShopCoop** | `Modules/Presence/*`; roster keyed by **connection id**, not SteamID |
+| Peer identity, roster, names, remote avatars | **CardShopCoop** | `Modules/Presence/*`; roster keyed by the host-canonical `PlayerRef` identity, not SteamID |
 | Save files / PlayerPrefs persistence | **Base game** | `CSaveLoad` → `Application.persistentDataPath`; PlayerPrefs → registry |
 | Per-instance user-profile isolation (saves, config, PlayerPrefs) | **Nucleus** | `Game.UseNucleusEnvironment`, `Game.UserProfileConfigPath`, or `LaunchAsDifferentUsers` |
 | Registry backup/restore across a session | **Nucleus** | handler registry-edit backup/restore |
@@ -142,8 +142,9 @@ This is the part that decides whether split-screen actually *plays*.
   `SessionInputRuntime.cs:36-52`). So each instance simply needs to *see* its own pad, which is
   exactly what Nucleus's XInput proxy (`Game.XInputPlusDll`) does.
 - **One player per process is assumed and is fine here.** Single `CoopCore` singleton
-  (`CoopPlugin.cs:169-176`), single `LocalConnectionId` (`CoopCore.cs:147`), `SceneRef<T>` resolves
-  exactly one instance (`SceneRef.cs:135-166`). Two processes ⇒ two connections ⇒ two avatars.
+  (`CoopPlugin.cs:169-176`), a single local connection identity (`CoopCore.cs:147`), and
+  `SceneRef<T>` resolves exactly one instance (`SceneRef.cs:135-166`). Two processes ⇒ two
+  connections ⇒ two avatars.
 - **Unfocused instances keep running — the single biggest de-risker.** The mod sets
   `Application.runInBackground = true` each frame (`CoopCore.cs:1323`), has no
   `OnApplicationFocus`/`OnApplicationPause` handler, and never reads `Application.isFocused`. Nucleus

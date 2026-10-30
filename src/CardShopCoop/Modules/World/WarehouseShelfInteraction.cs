@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Api;
 using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.Actions;
@@ -44,6 +45,7 @@ namespace CardShopCoop.Modules.World
 
         private readonly bool _host;
         private readonly Action<INetMessage> _broadcast;
+        private readonly Action<ICoopPeer, INetMessage> _send;
         private readonly BoxNetworkInteraction _boxes;
         private readonly PlayerBoxInteraction _playerBox;
         private readonly Func<bool> _inGame;
@@ -57,26 +59,11 @@ namespace CardShopCoop.Modules.World
         private bool _hostApplyingCommand;
         private bool _applyingRemote;
 
-        // Only one warehouse mutation may be in flight per compartment. Later take/store actions
-        // have already run the game's local path, but their intents are queued and sent only after
-        // the previous decision. A rejection drops the dependent queue.
-        private sealed class WarehouseMutation
-        {
-            internal long Key;
-            internal Guid ActionId;
-            internal Func<Guid> Send;
-            internal Action Cancel;
-        }
-
-        private readonly Dictionary<long, Queue<WarehouseMutation>> _queuedMutations = new();
-        private readonly Dictionary<long, WarehouseMutation> _inFlightMutations = new();
-        private readonly Dictionary<long, Guid> _inFlightPrediction = new();
-        private readonly Dictionary<Guid, long> _predictionCompartments = new();
-
-        // Incremented when an authoritative compartment state-set is applied. A prediction undo
-        // captured the previous value, so a rejection refresh that already installed authority
-        // makes the later generic rollback a no-op instead of inverting a newer state.
-        private readonly Dictionary<long, long> _authoritativeEpoch = new();
+        // Client: store predictions that have not settled yet, by action id, mapped to the entry
+        // identity they own. An authoritative compartment state that predates the action may arrive
+        // while its predicted record is transiently absent; the identity must survive that so the
+        // box's extended information is not retired under a still-pending action.
+        private readonly Dictionary<Guid, Guid> _pendingStores = new();
 
         // A shelf or compartment that is not loaded yet cannot be applied now. Keep the message
         // and retry on the world-ready/placement-structure signals instead of dropping it.
@@ -113,12 +100,12 @@ namespace CardShopCoop.Modules.World
         }
 
         internal WarehouseShelfInteraction(bool host, Action<INetMessage> broadcast,
-            Action<int, INetMessage> send, BoxNetworkInteraction boxes,
+            Action<ICoopPeer, INetMessage> send, BoxNetworkInteraction boxes,
             PlayerBoxInteraction playerBox = null, Func<bool> inGame = null)
         {
             _host = host;
             _broadcast = broadcast ?? throw new ArgumentNullException(nameof(broadcast));
-            _ = send ?? throw new ArgumentNullException(nameof(send));
+            _send = send ?? throw new ArgumentNullException(nameof(send));
             _boxes = boxes ?? throw new ArgumentNullException(nameof(boxes));
             _playerBox = playerBox;
             _inGame = inGame;
@@ -135,14 +122,9 @@ namespace CardShopCoop.Modules.World
 
         internal void Reset()
         {
-            AbandonAllMutations();
             _deferredStates.Clear();
             _deferredDeltas.Clear();
-            _queuedMutations.Clear();
-            _inFlightMutations.Clear();
-            _inFlightPrediction.Clear();
-            _predictionCompartments.Clear();
-            _authoritativeEpoch.Clear();
+            _pendingStores.Clear();
             _currentStoreBox = null;
             _currentStoreCompartment = null;
             _currentStoreSnapshot = null;
@@ -337,22 +319,15 @@ namespace CardShopCoop.Modules.World
             WarehouseBoxLocations.ClearLocation(capture.SourceId);
             var sourceRef = MakeRef(capture.Shelf, capture.CompartmentIndex, capture.SourceId,
                 capture.SourceSlot);
-            var key = CompartmentKey(capture.Shelf, capture.CompartmentIndex);
-            var epoch = EpochOf(key);
             var descriptor = DescribeCreatedBox(createdId, held, capture.Facts);
-            var delta = new WarehouseDeltaMessage
+            SendTake(new WarehouseTakeAction
             {
-                IsStore = false,
-                Ref = sourceRef,
-                ItemType = capture.Facts.ItemType,
-                Amount = capture.Facts.Amount,
-                IsBig = capture.Facts.IsBig,
-                Box = held,
-            };
-
-            EnqueueMutation(key,
-                () => SendTakePrediction(key, epoch, sourceRef, descriptor, capture.Facts, held),
-                () => UndoTake(key, epoch, sourceRef, capture.Facts, descriptor, held));
+                Source = sourceRef,
+                CreatedBox = descriptor,
+                Facts = capture.Facts,
+                HeldBox = held,
+                Origin = this,
+            });
         }
 
         internal void EndCoveredTake(WarehouseTakeCapture capture)
@@ -429,7 +404,7 @@ namespace CardShopCoop.Modules.World
         internal void OnStoredBoxRecordAdded(ShelfCompartment compartment)
         {
             if (compartment == null || !IsWarehouse(compartment)
-                || _hostApplyingCommand || _applyingRemote || ActionLedger.IsReconciling)
+                || _hostApplyingCommand || _applyingRemote || ReentrancyGuard.ActionApplying)
             {
                 return;
             }
@@ -508,12 +483,19 @@ namespace CardShopCoop.Modules.World
 
             var snapshot = _currentStoreSnapshot;
             var liveBox = _currentStoreBox;
-            var epoch = EpochOf(CompartmentKey(shelf, compartmentIndex));
-            EnqueueMutation(CompartmentKey(shelf, compartmentIndex),
-                () => SendStorePrediction(CompartmentKey(shelf, compartmentIndex), epoch, shelf,
-                    compartmentIndex, sourceRef, facts, liveBox, snapshot),
-                () => UndoStore(CompartmentKey(shelf, compartmentIndex), epoch, shelf,
-                    compartmentIndex, sourceRef, facts, snapshot));
+            SendStore(new WarehouseStoreAction
+            {
+                Shelf = shelf,
+                CompartmentIndex = compartmentIndex,
+                Box = liveBox,
+                ItemType = facts.ItemType,
+                Amount = facts.Amount,
+                IsBig = facts.IsBig,
+                SourceRef = sourceRef,
+                Facts = facts,
+                Snapshot = snapshot,
+                Origin = this,
+            });
         }
 
         /// <summary>The recorded facts at the top of the compartment, read before the game pops
@@ -547,7 +529,7 @@ namespace CardShopCoop.Modules.World
                     + "] had no identity location; the next baseline will rebuild it.");
             }
 
-            if (!_applyingRemote && !_hostApplyingCommand && !ActionLedger.IsReconciling)
+            if (!_applyingRemote && !_hostApplyingCommand && !ReentrancyGuard.ActionApplying)
             {
                 CanonicalizeRecords(compartment);
             }
@@ -583,48 +565,46 @@ namespace CardShopCoop.Modules.World
             });
         }
 
-        /// <summary>Host: applies a client store. On any refusal the requester receives the
-        /// authoritative compartment state before the generic rollback.</summary>
-        internal bool HostApplyStore(WarehouseStoreMessage message, int connectionId,
-            Action<INetMessage> response = null)
+        /// <summary>Host: applies a client store. The answer carries the compartment's
+        /// post-action state on accept and on reject, so the requester's prediction always merges
+        /// onto real state. An accepted store also returns the delta every other peer applies.</summary>
+        internal ActionOutcome HostApplyStore(WarehouseStoreAction message,
+            out WarehouseDeltaMessage broadcast)
         {
-            if (!_host || !Validate(message) || !TryGetBoxId(message.Box, out var boxNetworkId,
-                    "store"))
+            broadcast = null;
+            if (!_host || !Validate(message)
+                || !TryGetBoxId(message.Box, out var boxNetworkId, "store"))
             {
-                return false;
+                return RefuseStore(message, "the store payload is incomplete");
             }
 
             var compartment = ResolveCompartment(message.Shelf, message.CompartmentIndex);
             var storeBox = message.Box as InteractablePackagingBox_Item;
             var accepted = false;
+            var reason = null as string;
             if (compartment == null)
             {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: shelf "
-                    + (message.Shelf == null ? "<null>" : message.Shelf.name) + " has no "
-                    + "compartment " + message.CompartmentIndex + ".");
+                reason = "shelf " + (message.Shelf == null ? "<null>" : message.Shelf.name)
+                    + " has no compartment " + message.CompartmentIndex;
             }
             else if (storeBox == null)
             {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: box " + message.Box.name
-                    + " is not an item box.");
+                reason = "box " + message.Box.name + " is not an item box";
             }
             else if (storeBox.m_ItemCompartment == null)
             {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: box " + message.Box.name
-                    + " has no item compartment.");
+                reason = "box " + message.Box.name + " has no item compartment";
             }
             else if (storeBox.m_ItemCompartment.GetItemType() != message.ItemType
                      || storeBox.m_ItemCompartment.GetItemCount() != message.Amount
                      || storeBox.m_IsBigBox != message.IsBig)
             {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: payload disagrees with box "
-                    + message.Box.name + ".");
+                reason = "payload disagrees with box " + message.Box.name;
             }
             else if (IsShelvedElsewhere(message.Shelf, message.CompartmentIndex, boxNetworkId,
                          storeBox))
             {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: box " + message.Box.name
-                    + " is already stored in another compartment.");
+                reason = "box " + message.Box.name + " is already stored in another compartment";
             }
             else if (CanStore(compartment, message.ItemType, message.Amount, message.IsBig))
             {
@@ -634,6 +614,11 @@ namespace CardShopCoop.Modules.World
                     accepted = ApplyRecordStore(compartment, message.Shelf,
                         message.CompartmentIndex, boxNetworkId, message.ItemType,
                         message.Amount, message.IsBig);
+                    if (!accepted)
+                    {
+                        reason = "the compartment already holds id=" + boxNetworkId
+                            + " with different values";
+                    }
                 }
                 catch (Exception e)
                 {
@@ -647,21 +632,19 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: shelf "
-                    + message.Shelf.name + " compartment " + message.CompartmentIndex
-                    + " will not take box " + message.Box.name + " (" + message.ItemType + " x"
-                    + message.Amount + ", big=" + message.IsBig + ").");
+                reason = "shelf " + message.Shelf.name + " compartment "
+                    + message.CompartmentIndex + " will not take box " + message.Box.name + " ("
+                    + message.ItemType + " x" + message.Amount + ", big=" + message.IsBig + ")";
             }
 
             if (!accepted)
             {
-                SendCompartmentState(response, compartment);
-                return false;
+                CoopPlugin.Log.LogWarning("Warehouse store rejected: " + reason + ".");
+                return ActionOutcome.Reject(reason, BuildResult(compartment));
             }
 
-            BroadcastDelta(new WarehouseDeltaMessage
+            broadcast = new WarehouseDeltaMessage
             {
-                ActionId = message.ActionId,
                 IsStore = true,
                 Ref = MakeRef(message.Shelf, message.CompartmentIndex, boxNetworkId,
                     SlotOf(boxNetworkId)),
@@ -671,8 +654,8 @@ namespace CardShopCoop.Modules.World
                 // Records have no live storage object; the take respawn's EntityAdded owns the
                 // representation on the observing peer.
                 Box = null,
-            });
-            return true;
+            };
+            return ActionOutcome.Applied(BuildResult(compartment));
         }
 
         private bool ApplyRecordStore(ShelfCompartment compartment, WarehouseShelf shelf,
@@ -714,17 +697,20 @@ namespace CardShopCoop.Modules.World
         }
 
         /// <summary>Host: applies a client take. The source's top is validated against the
-        /// descriptor facts; a mismatch refreshes the requester with the authoritative compartment
-        /// state and rejects the intent.</summary>
-        internal bool HostApplyTake(WarehouseTakeMessage message, int connectionId,
-            Action<INetMessage> response = null)
+        /// descriptor facts; the answer carries the compartment's post-action state on accept and
+        /// reject alike, and an accepted take returns the delta every other peer applies plus the
+        /// live box whose granted hold must be announced after that delta.</summary>
+        internal ActionOutcome HostApplyTake(WarehouseTakeAction message,
+            out WarehouseDeltaMessage broadcast, out InteractablePackagingBox grantedHold)
         {
+            broadcast = null;
+            grantedHold = null;
             if (!_host || message?.Source?.Shelf == null
                 || message.CreatedBox is not PackagingBoxEntityDescriptor created
                 || created.BoxNetworkId == Guid.Empty
                 || created.BoxKind != BoxNetworkKind.Item)
             {
-                return false;
+                return RefuseTake(message, "the take payload is incomplete");
             }
 
             var compartment = ResolveCompartment(message.Source.Shelf,
@@ -733,10 +719,9 @@ namespace CardShopCoop.Modules.World
                 || !TryGetTopEntry(compartment, out var topFacts, out var topId, out var topSlot,
                     out var topLive))
             {
-                CoopPlugin.Log.LogWarning("[warehouse] host take rejected: the source compartment "
-                    + "has no readable top entry.");
-                SendCompartmentState(response, compartment);
-                return false;
+                const string missing = "the source compartment has no readable top entry";
+                CoopPlugin.Log.LogWarning("[warehouse] host take rejected: " + missing + ".");
+                return ActionOutcome.Reject(missing, BuildResult(compartment));
             }
 
             if (!topFacts.IsValid
@@ -747,23 +732,21 @@ namespace CardShopCoop.Modules.World
                     && message.Source.Identity != topId)
                 || (message.Source.Slot >= 0 && message.Source.Slot != topSlot))
             {
-                CoopPlugin.Log.LogWarning("[warehouse] host take rejected: source top ("
-                    + topFacts.ItemType + " x" + topFacts.Amount + ", big=" + topFacts.IsBig
-                    + ", id=" + topId + ", slot=" + topSlot + ") disagrees with created box ("
-                    + created.BoxItemType + " x" + created.BoxItemCount + ", big="
-                    + created.BoxBig + ", id=" + created.BoxNetworkId + ", slot="
-                    + message.Source.Slot + ").");
-                SendCompartmentState(response, compartment);
-                return false;
+                var mismatch = "source top (" + topFacts.ItemType + " x" + topFacts.Amount
+                    + ", big=" + topFacts.IsBig + ", id=" + topId + ", slot=" + topSlot
+                    + ") disagrees with created box (" + created.BoxItemType + " x"
+                    + created.BoxItemCount + ", big=" + created.BoxBig + ", id="
+                    + created.BoxNetworkId + ", slot=" + message.Source.Slot + ")";
+                CoopPlugin.Log.LogWarning("[warehouse] host take rejected: " + mismatch + ".");
+                return ActionOutcome.Reject(mismatch, BuildResult(compartment));
             }
 
             var createdId = created.BoxNetworkId;
             if (!_boxes.PushHostCreatedId(createdId, topLive))
             {
-                CoopPlugin.Log.LogWarning("[warehouse] host take rejected: box id=" + createdId
-                    + " is not a fresh creator id.");
-                SendCompartmentState(response, compartment);
-                return false;
+                var stale = "box id=" + createdId + " is not a fresh creator id";
+                CoopPlugin.Log.LogWarning("[warehouse] host take rejected: " + stale + ".");
+                return ActionOutcome.Reject(stale, BuildResult(compartment));
             }
 
             var accepted = false;
@@ -798,27 +781,28 @@ namespace CardShopCoop.Modules.World
             if (!accepted)
             {
                 _boxes.CancelHostCreatedId(createdId);
-                SendCompartmentState(response, compartment);
-                return false;
+                const string failed = "the host could not pop the source top entry";
+                return ActionOutcome.Reject(failed, BuildResult(compartment));
             }
 
-            BroadcastDelta(new WarehouseDeltaMessage
+            broadcast = new WarehouseDeltaMessage
             {
-                ActionId = message.ActionId,
                 IsStore = false,
                 Ref = message.Source,
                 ItemType = topFacts.ItemType,
                 Amount = topFacts.Amount,
                 IsBig = topFacts.IsBig,
                 Box = spawned,
-            });
-            if (spawned != null)
-            {
-                _playerBox?.AnnounceGrantedHold(spawned, connectionId);
-            }
+            };
+            grantedHold = spawned;
 
-            return true;
+            return ActionOutcome.Applied(BuildResult(compartment));
         }
+
+        /// <summary>Host: announce a box the take handed to the acting player. Called after the
+        /// take delta, so every peer already knows the box before the hold references it.</summary>
+        internal void AnnounceGrantedHold(InteractablePackagingBox box, ICoopPeer peer)
+            => _playerBox?.AnnounceGrantedHold(box, peer?.Player?.Id ?? 0);
 
         private bool TryPopTopEntry(ShelfCompartment compartment, out WarehouseBoxFacts facts)
         {
@@ -939,10 +923,35 @@ namespace CardShopCoop.Modules.World
                 compartment.SetCompartmentBoxType(entry.IsBig);
                 compartment.SetCompartmentItemType(entry.ItemType);
             }
+        }
 
-            var key = CompartmentKey(entry.Shelf, entry.CompartmentIndex);
-            BumpEpoch(key);
-            AbandonMutation(key);
+        /// <summary>Client: applies the host's post-action state for one compartment. This is the
+        /// merge point of a warehouse action: the response state is authoritative on accept and
+        /// reject alike, and the action's own prediction is already settled.</summary>
+        private void ApplyCompartmentState(WarehouseCompartmentState entry)
+        {
+            if (entry == null)
+            {
+                return;
+            }
+
+            ResolveDeferredShelf(entry);
+            if (entry.Shelf == null)
+            {
+                CoopPlugin.Log.LogWarning("[warehouse] dropped action state: its shelf is not "
+                    + "loaded yet.");
+                return;
+            }
+
+            _applyingRemote = true;
+            try
+            {
+                ApplyAuthoritativeCompartment(entry);
+            }
+            finally
+            {
+                _applyingRemote = false;
+            }
         }
 
         /// <summary>An authoritative empty state means the host has no warehouse contents. Clear
@@ -971,9 +980,6 @@ namespace CardShopCoop.Modules.World
                         new List<Guid>(), true);
                     compartment.SetCompartmentBoxType(false);
                     compartment.SetCompartmentItemType(EItemType.None);
-                    var key = CompartmentKey(shelf, compartment.GetIndex());
-                    BumpEpoch(key);
-                    AbandonMutation(key);
                 }
             }
             finally
@@ -1215,280 +1221,106 @@ namespace CardShopCoop.Modules.World
             RebuildStoredRecords(compartment, shelf, compartmentIndex, entries, keepId);
         }
 
-        private void OnMutationRejected(long key)
+        /// <summary>The entry identities owned by store predictions that have not settled yet.
+        /// Authoritative compartment state may legitimately name fewer entries than the local
+        /// prediction holds; those identities must survive the clear so the box's extended
+        /// information is not retired under a still-pending action.</summary>
+        private HashSet<Guid> PendingStoreIds()
         {
-            var wasApplying = _applyingRemote;
-            _applyingRemote = true;
-            try
+            var ids = new HashSet<Guid>();
+            foreach (var pair in _pendingStores)
             {
-                // These local actions already ran the game path but were never sent. Undo them
-                // in reverse order so a generic rejection restores the pre-action compartment
-                // state; they are never replayed as followers.
-                CancelQueuedMutations(key);
-                DropQueuedMutations(key);
-                if (_inFlightMutations.TryGetValue(key, out var mutation))
+                if (pair.Value != Guid.Empty)
                 {
-                    // Re-assert the rejected action's pre-state after the dependent cancels. The
-                    // prediction framework already ran its undo once; the closure is idempotent and
-                    // restores a whole value snapshot rather than layering another inverse.
-                    try
-                    {
-                        mutation.Cancel?.Invoke();
-                    }
-                    catch (Exception error)
-                    {
-                        CoopPlugin.Log.LogWarning("[warehouse] re-applying the rejected mutation's "
-                            + "pre-state failed: " + error);
-                    }
-
-                    if (mutation.ActionId != Guid.Empty)
-                    {
-                        _predictionCompartments.Remove(mutation.ActionId);
-                    }
-
-                    _inFlightPrediction.Remove(key);
-                    _inFlightMutations.Remove(key);
-                    _queuedMutations.Remove(key);
+                    ids.Add(pair.Value);
                 }
             }
-            finally
-            {
-                _applyingRemote = wasApplying;
-            }
+
+            return ids;
         }
 
-        private void EnqueueMutation(long key, Func<Guid> send, Action cancel)
+        /// <summary>Client: sends one store prediction through the single send seam. The local game
+        /// path already appended the record, so the action only carries what an undo needs.</summary>
+        private void SendStore(WarehouseStoreAction action)
         {
-            var mutation = new WarehouseMutation { Key = key, Send = send, Cancel = cancel };
-            if (!_inFlightMutations.ContainsKey(key))
-            {
-                StartMutation(key, mutation);
-                return;
-            }
-
-            if (!_queuedMutations.TryGetValue(key, out var queue))
-            {
-                _queuedMutations[key] = queue = new Queue<WarehouseMutation>();
-            }
-
-            queue.Enqueue(mutation);
-        }
-
-        private void StartMutation(long key, WarehouseMutation mutation)
-        {
-            _inFlightMutations[key] = mutation;
-            Guid actionId;
-            try
-            {
-                actionId = mutation.Send();
-            }
-            catch
-            {
-                _inFlightMutations.Remove(key);
-                throw;
-            }
-
-            mutation.ActionId = actionId;
-            if (actionId == Guid.Empty)
-            {
-                // The mutation could not be sent (for example its live payload was unavailable).
-                // Do not leave the compartment blocked; the local game path has run, and the next
-                // authoritative state settles it.
-                _inFlightMutations.Remove(key);
-                AdvanceQueue(key);
-                return;
-            }
-
-            _predictionCompartments[actionId] = key;
-            _inFlightPrediction[key] = actionId;
-        }
-
-        private void AdvanceQueue(long key)
-        {
-            while (!_inFlightMutations.ContainsKey(key)
-                && _queuedMutations.TryGetValue(key, out var queue) && queue.Count > 0)
-            {
-                StartMutation(key, queue.Dequeue());
-            }
-
-            if (!_inFlightMutations.ContainsKey(key))
-            {
-                _queuedMutations.Remove(key);
-            }
-        }
-
-        internal void CompleteMutation(Guid actionId)
-        {
-            if (actionId == Guid.Empty
-                || !_predictionCompartments.TryGetValue(actionId, out var key))
-            {
-                return;
-            }
-
-            _predictionCompartments.Remove(actionId);
-            _inFlightPrediction.Remove(key);
-            _inFlightMutations.Remove(key);
-            AdvanceQueue(key);
-        }
-
-        private void AbandonMutation(long key)
-        {
-            // The authoritative state has already replaced this compartment. Cancel the local
-            // effects of actions that were never sent; their epoch-guarded undo is a no-op after
-            // the state's BumpEpoch.
-            CancelQueuedMutations(key);
-
-            if (_inFlightMutations.TryGetValue(key, out var mutation)
-                && mutation.ActionId != Guid.Empty)
-            {
-                _predictionCompartments.Remove(mutation.ActionId);
-                // Retire through the ledger instead of Ack: a trailing generic rollback must not
-                // invert the authority that just replaced this compartment. ApplyAuthoritative
-                // runs the action's epoch-guarded undo and settles any newer ledger action on the
-                // key; an already-retired id is simply applied as a no-op.
-                ActionLedger.ApplyAuthoritative(mutation.ActionId, () => { });
-            }
-
-            _inFlightPrediction.Remove(key);
-            _inFlightMutations.Remove(key);
-            _queuedMutations.Remove(key);
-        }
-
-        private void CancelQueuedMutations(long key)
-        {
-            if (!_queuedMutations.TryGetValue(key, out var queue) || queue.Count == 0)
-            {
-                return;
-            }
-
-            var pending = queue.ToArray();
-            for (var i = pending.Length - 1; i >= 0; i--)
-            {
-                try
-                {
-                    pending[i].Cancel?.Invoke();
-                }
-                catch (Exception error)
-                {
-                    CoopPlugin.Log.LogWarning("[warehouse] cancelling a dependent queued "
-                        + "mutation failed: " + error);
-                }
-            }
-        }
-
-        private void AbandonAllMutations()
-        {
-            foreach (var pair in _inFlightMutations)
-            {
-                if (pair.Value.ActionId != Guid.Empty)
-                {
-                    ActionLedger.Ack(pair.Value.ActionId);
-                }
-            }
-        }
-
-        private void DropQueuedMutations(long key)
-        {
-            if (_queuedMutations.TryGetValue(key, out var queue))
-            {
-                queue.Clear();
-            }
-        }
-
-        private long CompartmentKey(WarehouseShelf shelf, int compartmentIndex)
-            => ((long)shelf.GetInstanceID() << 32) | (uint)compartmentIndex;
-
-        private long EpochOf(long key)
-            => _authoritativeEpoch.TryGetValue(key, out var epoch) ? epoch : 0L;
-
-        private void BumpEpoch(long key) => _authoritativeEpoch[key] = EpochOf(key) + 1;
-
-        private Guid SendStorePrediction(long key, long epoch, WarehouseShelf shelf,
-            int compartmentIndex, WarehouseShelfBoxRef sourceRef, WarehouseBoxFacts facts,
-            InteractablePackagingBox liveBox, WarehouseCompartmentState snapshot)
-        {
-            var payload = liveBox;
+            var payload = action.Box;
             var temporary = false;
             if (payload == null)
             {
-                // The game destroys a record-store's live box immediately. A queued store's intent
-                // is sent later, so materialize a short-lived payload solely to name the identity on
-                // the wire; the host resolves it to its own replica of the same box.
-                payload = _boxes.MaterializeWarehouseStored(facts.ItemType, facts.Amount, facts.IsBig);
-                if (payload != null && sourceRef.Identity != Guid.Empty)
+                // The game destroys a record-store's live box immediately. Materialize a
+                // short-lived payload solely to name the identity on the wire; the host resolves it
+                // to its own replica of the same box.
+                payload = _boxes.MaterializeWarehouseStored(action.Facts.ItemType,
+                    action.Facts.Amount, action.Facts.IsBig);
+                if (payload != null && action.SourceRef.Identity != Guid.Empty)
                 {
-                    BoxIdentityLifecycle.BindClientBox(sourceRef.Identity, payload);
+                    BoxIdentityLifecycle.BindClientBox(action.SourceRef.Identity, payload);
                     temporary = true;
                 }
             }
 
             if (payload == null)
             {
-                CoopPlugin.Log.LogWarning("[warehouse] store box id=" + sourceRef.Identity
+                CoopPlugin.Log.LogWarning("[warehouse] store box id=" + action.SourceRef.Identity
                     + " has no live payload; the intent is not sent.");
-                return Guid.Empty;
+                return;
             }
 
-            var intent = new WarehouseStoreMessage
-            {
-                Shelf = shelf,
-                CompartmentIndex = compartmentIndex,
-                Box = payload,
-                ItemType = facts.ItemType,
-                Amount = facts.Amount,
-                IsBig = facts.IsBig,
-            };
+            action.Box = payload;
             try
             {
-                return WorldAction.Submit(PredictionScope(key), intent,
-                    () => ApplyStoreValues(shelf, compartmentIndex, sourceRef.Identity,
-                        facts.ItemType, facts.Amount, facts.IsBig),
-                    () => UndoStore(key, epoch, shelf, compartmentIndex, sourceRef, facts,
-                        snapshot),
-                    () => OnMutationRejected(key));
+                // The client send seam ignores the peer and routes the action to the host.
+                _send(null, action);
             }
             finally
             {
-                if (temporary && payload != null)
+                if (temporary)
                 {
                     BoxIdentityLifecycle.ForgetBox(payload);
                     _boxes.DestroyWithoutNotification(payload);
+                    action.Box = null;
                 }
+            }
+
+            if (action.ActionId != Guid.Empty && action.SourceRef.Identity != Guid.Empty)
+            {
+                // The framework assigned the action id while sending; only now can the artifact be
+                // tracked by the id the host will answer.
+                _pendingStores[action.ActionId] = action.SourceRef.Identity;
             }
         }
 
-        private Guid SendTakePrediction(long key, long epoch, WarehouseShelfBoxRef sourceRef,
-            EntityDescriptor createdBox, WarehouseBoxFacts facts, InteractablePackagingBox held)
+        /// <summary>Client: sends one take prediction. The game's own click path already popped
+        /// the record and moved the box into the hand; the action keeps the exact box it owns for a
+        /// faithful undo.</summary>
+        private void SendTake(WarehouseTakeAction action)
         {
-            var intent = new WarehouseTakeMessage
-            {
-                Source = sourceRef,
-                CreatedBox = createdBox,
-            };
-            return WorldAction.Submit(PredictionScope(key), intent,
-                () => { },
-                () => UndoTake(key, epoch, sourceRef, facts, createdBox, held),
-                () => OnMutationRejected(key));
+            // The client send seam ignores the peer and routes the action to the host.
+            _send(null, action);
         }
 
-        private void UndoStore(long key, long epoch, WarehouseShelf shelf, int compartmentIndex,
-            WarehouseShelfBoxRef sourceRef, WarehouseBoxFacts facts,
-            WarehouseCompartmentState snapshot)
+        /// <summary>Client: reverses a rejected store prediction. The record the game appended goes
+        /// back out of the compartment and the box returns to the hand; the authoritative
+        /// compartment state follows in the merge.</summary>
+        internal void UndoStore(WarehouseStoreAction action)
         {
-            if (EpochOf(key) != epoch)
+            var sourceRef = action?.SourceRef;
+            if (sourceRef?.Shelf == null)
             {
                 return;
             }
 
+            var shelf = sourceRef.Shelf;
+            var compartmentIndex = sourceRef.CompartmentIndex;
             var compartment = ResolveCompartment(shelf, compartmentIndex);
             if (compartment == null)
             {
                 return;
             }
 
-            if (snapshot != null)
+            if (action.Snapshot != null)
             {
-                RebuildFromSnapshot(compartment, snapshot, sourceRef.Identity);
+                RebuildFromSnapshot(compartment, action.Snapshot, sourceRef.Identity);
             }
             else
             {
@@ -1496,8 +1328,8 @@ namespace CardShopCoop.Modules.World
                     sourceRef.Identity, sourceRef.Identity);
             }
 
-            if (!_boxes.ClientEnsureWarehouseTake(sourceRef.Identity, facts.ItemType, facts.Amount,
-                    facts.IsBig, out var held))
+            if (!_boxes.ClientEnsureWarehouseTake(sourceRef.Identity, action.Facts.ItemType,
+                    action.Facts.Amount, action.Facts.IsBig, out var held))
             {
                 CoopPlugin.Log.LogWarning("[warehouse] store rollback could not restore box id="
                     + sourceRef.Identity + " into the hand.");
@@ -1508,10 +1340,36 @@ namespace CardShopCoop.Modules.World
             TakeIntoLocalHand(held);
         }
 
-        private void UndoTake(long key, long epoch, WarehouseShelfBoxRef sourceRef,
-            WarehouseBoxFacts facts, EntityDescriptor createdBox, InteractablePackagingBox held)
+        /// <summary>Client: settles a store prediction on the host's compartment state and releases
+        /// the local artifact the action owned.</summary>
+        internal void MergeStore(WarehouseStoreAction action, WarehouseShelfResult response)
         {
-            if (EpochOf(key) != epoch)
+            if (action == null)
+            {
+                return;
+            }
+
+            _pendingStores.Remove(action.ActionId);
+            action.Origin = null;
+            action.Snapshot = null;
+            action.Box = null;
+            action.SourceRef = null;
+            if (response?.Compartment == null)
+            {
+                CoopPlugin.Log.LogWarning("[warehouse] store action " + action.ActionId
+                    + " settled without authoritative compartment state.");
+                return;
+            }
+
+            ApplyCompartmentState(response.Compartment);
+        }
+
+        /// <summary>Client: reverses a rejected take prediction. The record returns to the top of
+        /// the source compartment and the box the prediction put in the hand is retired.</summary>
+        internal void UndoTake(WarehouseTakeAction action)
+        {
+            var sourceRef = action?.Source;
+            if (sourceRef?.Shelf == null)
             {
                 return;
             }
@@ -1529,8 +1387,9 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var createdId = createdBox is PackagingBoxEntityDescriptor descriptor
+            var createdId = action.CreatedBox is PackagingBoxEntityDescriptor descriptor
                 ? descriptor.BoxNetworkId : Guid.Empty;
+            var held = action.HeldBox;
             if (held != null && _boxes.TryGetId(held, out var heldId) && heldId == createdId
                 && !BoxNetworkInteraction.IsStoredBox(held))
             {
@@ -1540,7 +1399,7 @@ namespace CardShopCoop.Modules.World
                 _boxes.DestroyWithoutNotification(held);
             }
 
-            AddRecord(compartment, facts.ItemType, facts.Amount, facts.IsBig);
+            AddRecord(compartment, action.Facts.ItemType, action.Facts.Amount, action.Facts.IsBig);
             // The game appended the restored record. Give any pre-existing records their ids
             // first, then align the restored id with the append before the canonical sort.
             WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex,
@@ -1550,6 +1409,29 @@ namespace CardShopCoop.Modules.World
             ids.Add(sourceRef.Identity);
             WarehouseBoxLocations.SetCompartmentOrder(shelf, compartmentIndex, ids, false);
             CanonicalizeRecords(compartment);
+        }
+
+        /// <summary>Client: settles a take prediction on the host's compartment state and releases
+        /// the local artifact the action owned. The taken box in the hand is not part of the
+        /// compartment state, so it survives the merge.</summary>
+        internal void MergeTake(WarehouseTakeAction action, WarehouseShelfResult response)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            action.Origin = null;
+            action.HeldBox = null;
+            action.Source = null;
+            if (response?.Compartment == null)
+            {
+                CoopPlugin.Log.LogWarning("[warehouse] take action " + action.ActionId
+                    + " settled without authoritative compartment state.");
+                return;
+            }
+
+            ApplyCompartmentState(response.Compartment);
         }
 
         private void RebuildFromSnapshot(ShelfCompartment compartment,
@@ -1682,27 +1564,33 @@ namespace CardShopCoop.Modules.World
             return message;
         }
 
-        /// <summary>Builds one compartment's authoritative state message (used as a per-requester
-        /// rejection refresh before the generic rollback).</summary>
-        internal WarehouseStateMessage BuildCompartmentStateMessage(ShelfCompartment compartment)
+        /// <summary>Builds the answer a warehouse action carries back to its actor: the compartment's
+        /// authoritative post-action state, or a state-less answer when the compartment cannot be
+        /// resolved on this peer.</summary>
+        private WarehouseShelfResult BuildResult(ShelfCompartment compartment)
+            => new()
+            {
+                Compartment = compartment == null ? null : BuildCompartmentState(compartment),
+            };
+
+        /// <summary>Refuses a store before host execution. The answer still carries the host's
+        /// current compartment state so the client's merge lands on reality.</summary>
+        internal ActionOutcome RefuseStore(WarehouseStoreAction action, string reason)
         {
-            var state = BuildCompartmentState(compartment);
-            return state == null ? null : new WarehouseStateMessage { Compartments = { state } };
+            CoopPlugin.Log.LogWarning("[warehouse] store refused: " + reason + ".");
+            var compartment = action?.Shelf == null
+                ? null : ResolveCompartment(action.Shelf, action.CompartmentIndex);
+            return ActionOutcome.Reject(reason, BuildResult(compartment));
         }
 
-        private void SendCompartmentState(Action<INetMessage> response,
-            ShelfCompartment compartment)
+        /// <summary>Refuses a take before host execution. The answer still carries the host's
+        /// current compartment state so the client's merge lands on reality.</summary>
+        internal ActionOutcome RefuseTake(WarehouseTakeAction action, string reason)
         {
-            if (response == null || compartment == null)
-            {
-                return;
-            }
-
-            var message = BuildCompartmentStateMessage(compartment);
-            if (message != null)
-            {
-                response(message);
-            }
+            CoopPlugin.Log.LogWarning("[warehouse] take refused: " + reason + ".");
+            var compartment = action?.Source?.Shelf == null
+                ? null : ResolveCompartment(action.Source.Shelf, action.Source.CompartmentIndex);
+            return ActionOutcome.Reject(reason, BuildResult(compartment));
         }
 
         private void BroadcastDelta(WarehouseDeltaMessage message)
@@ -1957,6 +1845,24 @@ namespace CardShopCoop.Modules.World
             var ids = shelf != null && count > 0
                 ? WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex, count)
                 : null;
+
+            if (_pendingStores.Count > 0)
+            {
+                // A pending store's record may be absent from this (older) authoritative state;
+                // its extended information still belongs to the box the prediction owns.
+                var protectedIds = PendingStoreIds();
+                if (keepIds == null)
+                {
+                    keepIds = protectedIds;
+                }
+                else
+                {
+                    foreach (var id in protectedIds)
+                    {
+                        keepIds.Add(id);
+                    }
+                }
+            }
 
             while (RecordCount(compartment) > 0)
             {
@@ -2384,9 +2290,6 @@ namespace CardShopCoop.Modules.World
             };
         }
 
-        private static string PredictionScope(long key)
-            => WorldAction.WarehouseScope + ":" + key;
-
         private bool TryGetBoxId(InteractablePackagingBox box, out Guid id, string context)
         {
             id = Guid.Empty;
@@ -2462,7 +2365,7 @@ namespace CardShopCoop.Modules.World
         private static bool IsValidBox(EItemType type, int amount)
             => type != EItemType.None && amount > 0 && amount <= MaxWarehouseAmount;
 
-        private static bool Validate(WarehouseStoreMessage message)
+        private static bool Validate(WarehouseStoreAction message)
             => message?.Shelf != null && message.Box != null && message.CompartmentIndex >= 0
                 && IsValidBox(message.ItemType, message.Amount);
 
@@ -2613,5 +2516,84 @@ namespace CardShopCoop.Modules.World
                     + "missing. Both live game builds use records; this DLL needs updating.");
             }
         }
+    }
+
+    /// <summary>
+    /// The host's post-action answer to one warehouse action, sent to the acting client on accept
+    /// and reject alike. <see cref="Compartment"/> is the host's authoritative state for the one
+    /// compartment the action touched, so the prediction merges onto real state instead of
+    /// inverting a snapshot authority has already moved past.
+    /// </summary>
+    [NetworkMessage]
+    public sealed class WarehouseShelfResult : ActionResponseMessage
+    {
+        public WarehouseCompartmentState Compartment;
+    }
+
+    /// <summary>
+    /// Client -> host: store one live item box into a warehouse compartment. The client's game path
+    /// already appended the record, so the action only carries what a reversal needs; the host
+    /// validates the live box against its own copy and applies the record itself.
+    /// </summary>
+    [NetworkMessage]
+    public sealed class WarehouseStoreAction : WorldIntentMessage
+    {
+        public WarehouseShelf Shelf;
+        public int CompartmentIndex;
+        public InteractablePackagingBox Box;
+        public EItemType ItemType;
+        public int Amount;
+        public bool IsBig;
+
+        /// <summary>The entry and values the prediction moved. Local only; the host reads its own
+        /// copy of the box and never trusts client-supplied state.</summary>
+        [NonSerialized]
+        internal WarehouseShelfBoxRef SourceRef;
+
+        [NonSerialized]
+        internal WarehouseShelfInteraction.WarehouseBoxFacts Facts;
+
+        /// <summary>The compartment before the game's own store appended its record. Local only.</summary>
+        [NonSerialized]
+        internal WarehouseCompartmentState Snapshot;
+
+        /// <summary>The client-side warehouse protocol that owns this prediction. Local only.</summary>
+        [NonSerialized]
+        internal WarehouseShelfInteraction Origin;
+
+        public override void OnUndo(ActionResponseMessage response) => Origin?.UndoStore(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => Origin?.MergeStore(this, response as WarehouseShelfResult);
+    }
+
+    /// <summary>
+    /// Client -> host: take the top entry of a warehouse compartment. The client's game path already
+    /// popped the record and moved the box into the hand; the host validates the source top against
+    /// the descriptor and performs the same pop on its own state.
+    /// </summary>
+    [NetworkMessage]
+    public sealed class WarehouseTakeAction : WorldIntentMessage
+    {
+        public WarehouseShelfBoxRef Source;
+        public EntityDescriptor CreatedBox;
+
+        /// <summary>The values the prediction removed. Local only.</summary>
+        [NonSerialized]
+        internal WarehouseShelfInteraction.WarehouseBoxFacts Facts;
+
+        /// <summary>The exact live box the prediction put in the hand, released by the undo. Local
+        /// only: the host creates its own representation.</summary>
+        [NonSerialized]
+        internal InteractablePackagingBox HeldBox;
+
+        /// <summary>The client-side warehouse protocol that owns this prediction. Local only.</summary>
+        [NonSerialized]
+        internal WarehouseShelfInteraction Origin;
+
+        public override void OnUndo(ActionResponseMessage response) => Origin?.UndoTake(this);
+
+        public override void OnMerge(ActionResponseMessage response)
+            => Origin?.MergeTake(this, response as WarehouseShelfResult);
     }
 }

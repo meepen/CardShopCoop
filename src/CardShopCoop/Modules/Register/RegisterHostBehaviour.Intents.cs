@@ -3,7 +3,7 @@ using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Register
 {
-    /// <summary>The host command lane. The handler runs the message's <c>OnApply</c> inside the
+    /// <summary>The host command lane. The handler applies the game path itself, inside the
     /// host-apply scope, then publishes the resulting snapshot for that action. The game hooks are
     /// suppressed during the apply, so exactly one authoritative state goes out.</summary>
     public sealed partial class RegisterHostBehaviour
@@ -16,14 +16,14 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.Claim(message.Counter);
             var counter = message.Counter;
-            if (context == null || counter == null)
+            if (context?.Peer == null || counter == null)
             {
                 return ActionOutcome.Applied();
             }
 
-            PublishNow(counter, context.Sender, message.ActionId);
+            PublishNow(counter, context.Peer.Player, message.ActionId);
             return ActionOutcome.Applied();
         }
 
@@ -35,7 +35,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.Release(message.Counter);
             var counter = message.Counter;
             if (counter == null)
             {
@@ -56,7 +56,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.ScanItem(message.Counter, message.Slot);
             PublishCheckout(message.Counter, message.ActionId);
             return ActionOutcome.Applied();
         }
@@ -70,7 +70,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.ScanCard(message.Counter, message.Slot);
             PublishCheckout(message.Counter, message.ActionId);
             return ActionOutcome.Applied();
         }
@@ -84,7 +84,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.TakePayment(message.Counter, message.IsCard);
             PublishCheckout(message.Counter, message.ActionId);
             return ActionOutcome.Applied();
         }
@@ -98,7 +98,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.CardPayment(message.Counter, message.Value);
             var counter = message.Counter;
             if (counter == null)
             {
@@ -121,7 +121,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.Change(message.Counter, message.Slot, message.IsCoin, message.TakeBack);
             PublishCheckout(message.Counter, message.ActionId);
             return ActionOutcome.Applied();
         }
@@ -135,7 +135,7 @@ namespace CardShopCoop.Modules.Register
                 return ActionOutcome.Reject("register command is missing");
             }
 
-            message.OnApply();
+            RegisterActions.Complete(message.Counter);
             var counter = message.Counter;
             if (counter == null)
             {

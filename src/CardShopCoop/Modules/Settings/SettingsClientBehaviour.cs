@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Settings
 {
@@ -20,6 +21,8 @@ namespace CardShopCoop.Modules.Settings
         private const byte OpTableNumber = 6;
         private static SettingsClientBehaviour _active;
         private static bool _applyingRemote;
+
+        internal static SettingsClientBehaviour Active => _active;
 
         private SettingsStateMessage _pendingFullState;
         private readonly Dictionary<string, SettingsStateMessage> _pendingStates = new();
@@ -87,9 +90,9 @@ namespace CardShopCoop.Modules.Settings
             {
                 var full = _pendingFullState;
                 _pendingFullState = null;
-                // Confirm, not AckOrApply: the host's state is authoritative and can carry a
-                // clamped/transformed value the optimistic local run did not produce.
-                ActionLedger.Confirm(full.ActionId, () => ApplyState(full));
+                // The host's state is authoritative and can carry a clamped/transformed value the
+                // optimistic local run did not produce.
+                ApplyState(full);
             }
 
             if (_pendingStates.Count > 0)
@@ -108,9 +111,9 @@ namespace CardShopCoop.Modules.Settings
                     }
 
                     _pendingStates.Remove(states[i].Key);
-                    // Confirm: retire the actor's prediction and apply the host's absolute value
-                    // (the host may clamp or otherwise transform the requested value).
-                    ActionLedger.Confirm(state.ActionId, () => ApplyState(state));
+                    // The host may clamp or otherwise transform the requested value, so apply its
+                    // absolute state.
+                    ApplyState(state);
                 }
             }
         }
@@ -146,14 +149,12 @@ namespace CardShopCoop.Modules.Settings
             if (!message.Full && message.Index == 6 && message.Cashier == null)
             {
                 CoopPlugin.Log.LogWarning("Settings client: dropped cashier state with no live counter.");
-                ActionLedger.Ack(message.ActionId);
                 return;
             }
 
             if (!message.Full && message.Index == 7 && message.Table == null)
             {
                 CoopPlugin.Log.LogWarning("Settings client: dropped table state with no live table.");
-                ActionLedger.Ack(message.ActionId);
                 return;
             }
 
@@ -165,12 +166,6 @@ namespace CardShopCoop.Modules.Settings
             else
             {
                 var key = StateKey(message);
-                if (_pendingStates.TryGetValue(key, out var previous))
-                {
-                    ActionLedger.Ack(previous.ActionId);
-                }
-
-
                 _pendingStates[key] = message;
             }
             TryApplyPendingState();
@@ -287,19 +282,7 @@ namespace CardShopCoop.Modules.Settings
 
         private void ClearPendingStates()
         {
-            foreach (var state in _pendingStates.Values)
-            {
-                ActionLedger.Ack(state.ActionId);
-            }
-
-
             _pendingStates.Clear();
-            if (_pendingFullState != null)
-            {
-                ActionLedger.Ack(_pendingFullState.ActionId);
-            }
-
-
             _pendingFullState = null;
         }
 
@@ -425,12 +408,9 @@ namespace CardShopCoop.Modules.Settings
                 Op = OpGameEvent,
                 Index = (int)CPlayerData.m_PendingGameEventFormat,
                 Expansion = CPlayerData.m_PendingGameEventExpansionType,
-            }, () =>
-                ApplyUndo(() =>
-                {
-                    CPlayerData.m_PendingGameEventFormat = previousFormat;
-                    CPlayerData.m_PendingGameEventExpansionType = previousExpansion;
-                }));
+                PreviousFormat = previousFormat,
+                PreviousExpansion = previousExpansion,
+            });
         }
 
         private static void SendGameEventFeeIntent(EGameEventFormat format, float fee, float previousFee)
@@ -446,7 +426,8 @@ namespace CardShopCoop.Modules.Settings
                 Op = OpGameEventFee,
                 Index = (int)format,
                 Fee = fee,
-            }, () => ApplyUndo(() => PriceChangeManager.SetGameEventPrice(format, previousFee)));
+                PreviousFee = previousFee,
+            });
         }
 
         private static void SendCashierIntent(InteractableCashierCounter counter, byte previousFlags)
@@ -463,11 +444,8 @@ namespace CardShopCoop.Modules.Settings
                 Cashier = counter,
                 CashierFlags = (byte)((counter.CanCheckout() ? 1 : 0)
                     | (counter.CanTradeCard() ? 2 : 0)),
-            }, () => ApplyUndo(() =>
-            {
-                counter.SetCanCheckout((previousFlags & 1) != 0);
-                counter.SetCanTradeCard((previousFlags & 2) != 0);
-            }));
+                PreviousFlags = previousFlags,
+            });
         }
 
         private static void SendTableIntent(InteractablePlayTable table, int number, int previousNumber)
@@ -483,10 +461,11 @@ namespace CardShopCoop.Modules.Settings
                 Op = OpTableNumber,
                 Table = table,
                 TableNumber = number,
-            }, () => ApplyUndo(() => table.SetTournamentPlayTableNumber(previousNumber)));
+                PreviousNumber = previousNumber,
+            });
         }
 
-        private void SendIntent(SettingsOpMessage message, Action undo)
+        private void SendIntent(SettingsOpMessage message)
         {
             if (_shutdown || message == null || !_joined || !RuntimeContext.InGame() || _applyingRemote)
             {
@@ -494,27 +473,61 @@ namespace CardShopCoop.Modules.Settings
             }
 
             // Post-hoc prediction: the game already applied the mutation in the postfix that
-            // called here, so only a rejection's undo closure is needed.
-            ActionLedger.Submit("settings",
-                actionId =>
-                {
-                    message.ActionId = actionId;
-                    RuntimeContext.Send(1, message);
-                },
-                () => { }, undo ?? (() => { }));
+            // called here. The message carries the prior values for OnUndo; the host answer
+            // carries the authoritative result.
+            Context.Send(message);
         }
 
-        private static void ApplyUndo(Action undo)
+        /// <summary>Reverses one refused settings operation through the game's own setters.</summary>
+        internal void UndoOperation(SettingsOpMessage message)
         {
+            if (_shutdown || message == null)
+            {
+                return;
+            }
+
             _applyingRemote = true;
             try
             {
-                undo();
+                switch (message.Op)
+                {
+                    case OpGameEvent:
+                        CPlayerData.m_PendingGameEventFormat = message.PreviousFormat;
+                        CPlayerData.m_PendingGameEventExpansionType = message.PreviousExpansion;
+                        break;
+                    case OpGameEventFee:
+                        PriceChangeManager.SetGameEventPrice((EGameEventFormat)message.Index,
+                            message.PreviousFee);
+                        break;
+                    case OpCashier:
+                        message.Cashier?.SetCanCheckout((message.PreviousFlags & 1) != 0);
+                        message.Cashier?.SetCanTradeCard((message.PreviousFlags & 2) != 0);
+                        break;
+                    case OpTableNumber:
+                        message.Table?.SetTournamentPlayTableNumber(message.PreviousNumber);
+                        break;
+                }
             }
             finally
             {
                 _applyingRemote = false;
             }
+        }
+
+        /// <summary>Applies the authoritative state carried by a settings response.</summary>
+        internal void MergeOperation(SettingsOpMessage message, ActionResponseMessage response)
+        {
+            if (_shutdown || response is not SettingsOpResponse answer || answer.State == null)
+            {
+                return;
+            }
+
+            AcceptState(answer.State);
+        }
+
+        private void AcceptState(SettingsStateMessage message)
+        {
+            HandleState(null, message);
         }
 
         [OnFullyJoined]

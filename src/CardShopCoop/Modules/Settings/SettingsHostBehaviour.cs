@@ -81,11 +81,11 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            RuntimeContext.Send(connection.Id, BuildFullState());
+            PeerHandle.ForConnection(connection)?.Send(BuildFullState());
         }
 
         [MessageHandler]
-        private ActionOutcome HandleOperation(MessageContext context, SettingsOpMessage message)
+        private ActionOutcome HandleOperation(CoopMessageContext context, SettingsOpMessage message)
         {
             if (!IsFullyJoinedSender(context))
             {
@@ -95,15 +95,15 @@ namespace CardShopCoop.Modules.Settings
             if (message == null)
             {
                 CoopPlugin.Log.LogWarning("Settings: rejected null authenticated operation from "
-                    + context.Connection.Id + ".");
+                    + (context.Peer == null ? "?" : context.Peer.Name) + ".");
                 return ActionOutcome.Reject("settings operation payload is missing");
             }
 
             if (!TryValidateOperation(message, out var reason))
             {
                 CoopPlugin.Log.LogWarning("Settings: rejected malformed authenticated operation from "
-                    + context.Connection.Id + ": " + reason);
-                return ActionOutcome.Reject(reason);
+                    + context.Peer.Name + ": " + reason);
+                return RejectOperation(context, reason);
             }
 
             switch (message.Op)
@@ -111,8 +111,7 @@ namespace CardShopCoop.Modules.Settings
                 case OpGameEvent:
                     CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)message.Index;
                     CPlayerData.m_PendingGameEventExpansionType = message.Expansion;
-                    BroadcastGameEvent(message.ActionId);
-                    return ActionOutcome.Applied();
+                    return ApplyAndAnswer(context, BuildGameEventState());
                 case OpGameEventFee:
                     _applyingRemote = true;
                     try
@@ -125,8 +124,8 @@ namespace CardShopCoop.Modules.Settings
                         _applyingRemote = false;
                     }
 
-                    BroadcastGameEventFee((EGameEventFormat)message.Index, message.ActionId);
-                    return ActionOutcome.Applied();
+                    return ApplyAndAnswer(context, BuildGameEventFeeState(
+                        (EGameEventFormat)message.Index));
                 case OpCashier:
                     {
                         // The intent names the live counter. A null means the entity is not live on
@@ -135,13 +134,12 @@ namespace CardShopCoop.Modules.Settings
                         if (counter == null)
                         {
                             CoopPlugin.Log.LogWarning("Settings: dropped cashier intent with no live "
-                                + "counter from connection " + context.Connection.Id + ".");
-                            return ActionOutcome.Reject("cashier is not live on the host");
+                                + "counter from " + context.Peer.Name + ".");
+                            return RejectOperation(context, "cashier is not live on the host");
                         }
 
                         ApplyCashier(counter, message.CashierFlags);
-                        PublishCashier(counter, "cashier intent", message.ActionId);
-                        return ActionOutcome.Applied();
+                        return ApplyAndAnswer(context, BuildCashierState(counter));
                     }
                 case OpTableNumber:
                     {
@@ -149,18 +147,51 @@ namespace CardShopCoop.Modules.Settings
                         if (table == null)
                         {
                             CoopPlugin.Log.LogWarning("Settings: dropped table intent with no live "
-                                + "table from connection " + context.Connection.Id + ".");
-                            return ActionOutcome.Reject("play table is not live on the host");
+                                + "table from " + context.Peer.Name + ".");
+                            return RejectOperation(context, "play table is not live on the host");
                         }
 
                         ApplyTableNumber(table, message.TableNumber);
-                        PublishTable(table, "table number intent", message.ActionId);
-                        return ActionOutcome.Applied();
+                        return ApplyAndAnswer(context, BuildTableState(table));
                     }
                 default:
                     CoopPlugin.Log.LogWarning("Settings: unknown sub-op " + message.Op);
                     return ActionOutcome.Reject("unknown settings operation");
             }
+        }
+
+        /// <summary>Publishes the resulting state to every other peer and answers the actor with
+        /// the same authoritative state.</summary>
+        private ActionOutcome ApplyAndAnswer(CoopMessageContext context,
+            SettingsStateMessage state)
+        {
+            if (state == null)
+            {
+                return ActionOutcome.Applied();
+            }
+
+            if (context?.Peer != null)
+            {
+                Context.BroadcastExcept(context.Peer, state);
+            }
+
+            return ActionOutcome.Applied(new SettingsOpResponse { State = state });
+        }
+
+        /// <summary>A refusal still answers with the host's authoritative settings so the actor's
+        /// optimistic local mutation settles to what the host actually holds.</summary>
+        private static ActionOutcome RejectOperation(CoopMessageContext context, string reason)
+        {
+            var active = _active;
+            if (active == null || context?.Peer == null || !SettingsInterop.IsSceneReady)
+            {
+                return ActionOutcome.Reject(reason);
+            }
+
+            return ActionOutcome.Reject(reason, new SettingsOpResponse
+            {
+                State = BuildFullState(),
+            });
         }
 
         private static bool IsValidEventIndex(int index, bool allowNone)
@@ -299,11 +330,11 @@ namespace CardShopCoop.Modules.Settings
 
         }
 
-        private bool IsFullyJoinedSender(MessageContext context)
+        private bool IsFullyJoinedSender(CoopMessageContext context)
         {
             return !_shutdown && RuntimeContext.InGame()
-                && context?.Connection != null
-                && context.Connection.State == ConnectionState.FullyJoined;
+                && context?.Peer != null
+                && context.Peer.State == ConnectionState.FullyJoined;
         }
 
         private static bool IsJoinPhase(ConnectionState state)
@@ -313,36 +344,34 @@ namespace CardShopCoop.Modules.Settings
 
         private void Broadcast(SettingsStateMessage message)
         {
-            if (_shutdown || !RuntimeContext.InGame())
+            if (_shutdown || !RuntimeContext.InGame() || message == null)
             {
                 return;
             }
 
-            RuntimeContext.Broadcast(message);
+            Context.Broadcast(message);
         }
 
-        private void BroadcastGameEvent(Guid actionId)
+        private static SettingsStateMessage BuildGameEventState()
         {
-            Broadcast(new SettingsStateMessage
+            return new SettingsStateMessage
             {
                 Full = false,
-                ActionId = actionId,
                 Index = 4,
                 GameEventFormat = (int)CPlayerData.m_GameEventFormat,
                 PendingGameEventFormat = (int)CPlayerData.m_PendingGameEventFormat,
                 GameEventExpansion = CPlayerData.m_GameEventExpansionType,
                 PendingGameEventExpansion = CPlayerData.m_PendingGameEventExpansionType,
-            });
+            };
         }
 
-        private void BroadcastGameEventFee(EGameEventFormat format, Guid actionId)
+        private static SettingsStateMessage BuildGameEventFeeState(EGameEventFormat format)
         {
             var index = (int)format;
             var fees = CPlayerData.m_SetGameEventPriceList;
             var message = new SettingsStateMessage
             {
                 Full = false,
-                ActionId = actionId,
                 Index = 5,
                 ItemIndex = index,
                 GameEventPriceCount = Math.Min(fees?.Count ?? 0, MaxWireListCount),
@@ -357,7 +386,7 @@ namespace CardShopCoop.Modules.Settings
                 message.Tombstone = true;
             }
 
-            Broadcast(message);
+            return message;
         }
 
         private static SettingsStateMessage BuildFullState()
@@ -443,7 +472,7 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            _active.BroadcastGameEvent(Guid.Empty);
+            _active.Broadcast(BuildGameEventState());
         }
 
         private static void BroadcastGameEventFee(EGameEventFormat format)
@@ -453,7 +482,7 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            _active.BroadcastGameEventFee(format, Guid.Empty);
+            _active.Broadcast(BuildGameEventFeeState(format));
         }
 
         private static void BroadcastCashier(InteractableCashierCounter counter)
@@ -476,8 +505,7 @@ namespace CardShopCoop.Modules.Settings
             _active.PublishTable(table, "table number mutation");
         }
 
-        private void PublishCashier(InteractableCashierCounter counter, string source,
-            Guid actionId = default)
+        private void PublishCashier(InteractableCashierCounter counter, string source)
         {
             if (counter == null)
             {
@@ -485,10 +513,14 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
+            Broadcast(BuildCashierState(counter));
+        }
+
+        private static SettingsStateMessage BuildCashierState(InteractableCashierCounter counter)
+        {
             var message = new SettingsStateMessage
             {
                 Full = false,
-                ActionId = actionId,
                 Index = 6,
                 Cashier = counter,
                 CashierCount = Math.Min(
@@ -497,11 +529,10 @@ namespace CardShopCoop.Modules.Settings
             };
             message.CashierFlags.Add((byte)((counter.CanCheckout() ? 1 : 0)
                 | (counter.CanTradeCard() ? 2 : 0)));
-            Broadcast(message);
+            return message;
         }
 
-        private void PublishTable(InteractablePlayTable table, string source,
-            Guid actionId = default)
+        private void PublishTable(InteractablePlayTable table, string source)
         {
             if (table == null)
             {
@@ -509,10 +540,14 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
+            Broadcast(BuildTableState(table));
+        }
+
+        private static SettingsStateMessage BuildTableState(InteractablePlayTable table)
+        {
             var message = new SettingsStateMessage
             {
                 Full = false,
-                ActionId = actionId,
                 Index = 7,
                 Table = table,
                 TableCount = Math.Min(
@@ -521,7 +556,7 @@ namespace CardShopCoop.Modules.Settings
             };
             message.TableNumbers.Add((byte)Mathf.Clamp(
                 table.GetTournamentPlayTableNumber(), 0, 255));
-            Broadcast(message);
+            return message;
         }
 
         [HarmonyPatch(typeof(SetGameEventFormatScreen), "OnPressConfirmBtn")]

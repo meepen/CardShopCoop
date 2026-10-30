@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Presence;
@@ -11,6 +12,7 @@ using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using CoopLog = CardShopCoop.Api.CoopLog;
 
 namespace CardShopCoop.Modules.Report
@@ -32,8 +34,8 @@ namespace CardShopCoop.Modules.Report
         private static ReportHostBehaviour _active;
         private bool _shutdown;
         private bool _initialized;
-        private readonly HashSet<int> _nextDayParticipants = new();
-        private readonly HashSet<int> _nextDayReadyPeers = new();
+        private readonly HashSet<ICoopPeer> _nextDayParticipants = new();
+        private readonly HashSet<ICoopPeer> _nextDayReadyPeers = new();
         private bool _nextDayHostReady;
         private bool _nextDayGateActive;
         private bool _advancingNextDay;
@@ -81,12 +83,13 @@ namespace CardShopCoop.Modules.Report
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
-            if (_shutdown || connection == null || !IsJoinPhase(connection.State))
+            var peer = PeerHandle.ForConnection(connection);
+            if (_shutdown || peer == null || !IsJoinPhase(peer.State))
             {
                 return;
             }
 
-            _nextDayParticipants.Add(connection.Id);
+            _nextDayParticipants.Add(peer);
             if (_nextDayGateActive)
             {
                 // A late joiner becomes a required reader mid-gate; make sure everyone sees them
@@ -99,19 +102,20 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            RuntimeContext.Send(connection.Id, BuildFullState());
+            peer.Send(BuildFullState());
         }
 
         [OnClientDisconnected]
         private void ForgetConnection(PeerConnection connection, DisconnectInfo info)
         {
-            if (_shutdown || connection == null)
+            var peer = PeerHandle.ForConnection(connection);
+            if (_shutdown || peer == null)
             {
                 return;
             }
 
-            var wasParticipant = _nextDayParticipants.Remove(connection.Id);
-            _nextDayReadyPeers.Remove(connection.Id);
+            var wasParticipant = _nextDayParticipants.Remove(peer);
+            _nextDayReadyPeers.Remove(peer);
             if (!wasParticipant || !_nextDayGateActive)
             {
                 return;
@@ -139,7 +143,8 @@ namespace CardShopCoop.Modules.Report
         [MessageHandler]
         private void HandleNextDayReady(MessageContext context, ReportNextDayReadyMessage message)
         {
-            if (_shutdown || _nextDayAdvancing || !RuntimeContext.InGame() || context?.Connection == null)
+            var peer = context?.Peer;
+            if (_shutdown || _nextDayAdvancing || !RuntimeContext.InGame() || peer == null)
             {
                 return;
             }
@@ -154,8 +159,7 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            var id = context.Connection.Id;
-            if (!_nextDayParticipants.Contains(id) || !_nextDayReadyPeers.Add(id))
+            if (!_nextDayParticipants.Contains(peer) || !_nextDayReadyPeers.Add(peer))
             {
                 return;
             }
@@ -211,9 +215,9 @@ namespace CardShopCoop.Modules.Report
                 return false;
             }
 
-            foreach (var id in _nextDayParticipants)
+            foreach (var peer in _nextDayParticipants)
             {
-                if (!_nextDayReadyPeers.Contains(id))
+                if (!_nextDayReadyPeers.Contains(peer))
                 {
                     return false;
                 }
@@ -354,7 +358,7 @@ namespace CardShopCoop.Modules.Report
             var showHostWait = _nextDayGateActive && pending.Count > 0;
             HudApi.SetNextDayWait(showHostWait,
                 showHostWait ? "Waiting for: " + string.Join(", ", pending) : "", countdown);
-            RuntimeContext.Broadcast(new ReportNextDayWaitMessage
+            Context.Broadcast(new ReportNextDayWaitMessage
             {
                 Active = _nextDayGateActive,
                 Pending = pending,
@@ -370,15 +374,15 @@ namespace CardShopCoop.Modules.Report
                 pending.Add(PresenceApi.LocalPlayerName);
             }
 
-            foreach (var id in _nextDayParticipants)
+            foreach (var peer in _nextDayParticipants)
             {
-                if (_nextDayReadyPeers.Contains(id))
+                if (_nextDayReadyPeers.Contains(peer))
                 {
                     continue;
                 }
 
-                var name = RuntimeContext.PeerName?.Invoke(id);
-                pending.Add(string.IsNullOrWhiteSpace(name) ? "Player " + id : name);
+                var name = peer.Name;
+                pending.Add(string.IsNullOrWhiteSpace(name) ? "Player" : name);
             }
 
             return pending;
@@ -395,16 +399,6 @@ namespace CardShopCoop.Modules.Report
             message.Full = true;
             message.Index = -1;
             return message;
-        }
-
-        private void Publish(ReportStateMessage message)
-        {
-            if (_shutdown || message == null || !RuntimeContext.InGame())
-            {
-                return;
-            }
-
-            RuntimeContext.Broadcast(message);
         }
 
         private static ReportStateMessage BuildState(GameReportDataCollect report, int index,
@@ -570,7 +564,7 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            RuntimeContext.Broadcast(ToDelta(source, kind));
+            Context.Broadcast(ToDelta(source, kind));
         }
 
         private static ReportDeltaMessage ToDelta(ReportStateMessage source, int kind)

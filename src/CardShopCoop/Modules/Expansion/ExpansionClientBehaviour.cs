@@ -1,10 +1,11 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
 
@@ -17,7 +18,6 @@ namespace CardShopCoop.Modules.Expansion
     public sealed class ExpansionClientBehaviour : CoopBehaviour
     {
         private static ExpansionClientBehaviour _active;
-        private static int _applyingPrediction;
         private bool _shutdown;
         private bool _initialized;
         private bool _joined;
@@ -193,25 +193,16 @@ namespace CardShopCoop.Modules.Expansion
             var delta = pending;
             pending = null;
             // The game already applied a client purchase locally; the host echoes the absolute
-            // counts, so Confirm retires the actor's prediction AND applies them. A concurrent
-            // purchase committed elsewhere can leave the host count ahead of the local run.
-            ActionLedger.Confirm(delta.ActionId, () =>
-            {
-                ExpansionInterop.ApplyDelta(manager, delta);
-                ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
-            });
+            // counts, so this applies authority over the local run. A concurrent purchase
+            // committed elsewhere can leave the host count ahead of the local run.
+            ExpansionInterop.ApplyDelta(manager, delta);
+            ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
         }
 
         private static void ReplacePending(ref ExpansionDeltaMessage pending,
             ExpansionDeltaMessage replacement)
         {
-            // A superseding authoritative delta retires the prediction the replaced one carried;
-            // absolute counts make the earlier message redundant.
-            if (pending != null && !ReferenceEquals(pending, replacement))
-            {
-                ActionLedger.Ack(pending.ActionId);
-            }
-
+            // Absolute counts make the earlier message redundant.
             pending = replacement;
         }
 
@@ -222,9 +213,9 @@ namespace CardShopCoop.Modules.Expansion
             ReplacePending(ref _pendingWarehouseUnlockDelta, null);
         }
 
-        /// <summary>Pre-state captured by a purchase prefix so the postfix can register one
-        /// post-hoc prediction and the undo can restore the authoritative counts.</summary>
-        private sealed class PurchaseCapture
+        /// <summary>Pre-state captured by a purchase prefix so the postfix can send one predicted
+        /// purchase and the undo can restore the authoritative counts.</summary>
+        internal sealed class PurchaseCapture
         {
             public UnlockRoomManager Manager;
             public ExpansionInterop.StateSnapshot Snapshot;
@@ -240,7 +231,7 @@ namespace CardShopCoop.Modules.Expansion
         {
             var client = _active;
             if (client == null || client._shutdown || !client._joined
-                || !client.RuntimeContext.InGame() || _applyingPrediction != 0
+                || !client.RuntimeContext.InGame()
                 || ExpansionInterop.ApplyingAuthoritativeState)
             {
                 return null;
@@ -259,10 +250,10 @@ namespace CardShopCoop.Modules.Expansion
             };
         }
 
-        /// <summary>Registers one post-hoc prediction for a purchase the game just completed. The
+        /// <summary>Sends one predicted purchase for an expansion the game just completed. The
         /// game owns the local mutation; a host rejection restores the captured counts through the
-        /// same <c>Init</c> path.</summary>
-        private static void Observe(PurchaseCapture capture, byte kind, Action replay)
+        /// same <c>Init</c> path, and the response merges the host's absolute state.</summary>
+        private static void Observe(PurchaseCapture capture, byte kind)
         {
             var client = _active;
             if (client == null || !client._joined
@@ -275,28 +266,60 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_UnlockRoomCount + " warehouseRooms="
                 + CPlayerData.m_UnlockWarehouseRoomCount + " unlocked="
                 + CPlayerData.m_IsWarehouseRoomUnlocked + ".");
-            ActionLedger.Submit("expansion:" + kind,
-                id => client.RuntimeContext.Send(1, new ExpansionPurchaseMessage
-                {
-                    ActionId = id,
-                    Kind = kind,
-                }),
-                () => WithPrediction(replay),
-                () => WithPrediction(() =>
-                    ExpansionInterop.RollbackState(capture.Manager, capture.Snapshot)));
+            if (client.Context?.Host == null)
+            {
+                CoopPlugin.Log.LogError("[expansion] purchase was not forwarded: no host.");
+                return;
+            }
+
+            client.Context.Send(new ExpansionPurchaseMessage
+            {
+                Kind = kind,
+                Capture = capture,
+            });
         }
 
-        private static void WithPrediction(Action action)
+        /// <summary>Restores the local pre-purchase snapshot after a host refusal.</summary>
+        internal static void Rollback(PurchaseCapture capture)
         {
-            _applyingPrediction++;
-            try
+            if (capture != null)
             {
-                action();
+                ExpansionInterop.RollbackState(capture.Manager, capture.Snapshot);
             }
-            finally
+        }
+
+        /// <summary>Applies the host's post-purchase state for the acting client.</summary>
+        internal static void ApplyResponse(ActionResponseMessage response)
+        {
+            var client = _active;
+            if (client == null || client._shutdown || !(response is ExpansionPurchaseResponse result))
             {
-                _applyingPrediction--;
+                return;
             }
+
+            var delta = new ExpansionDeltaMessage
+            {
+                Area = result.Area,
+                Count = result.Count,
+                Unlocked = result.Unlocked,
+            };
+            switch (delta.Area)
+            {
+                case 0:
+                    ReplacePending(ref client._pendingShopDelta, delta);
+                    break;
+                case 1:
+                    ReplacePending(ref client._pendingWarehouseDelta, delta);
+                    break;
+                case 2:
+                    ReplacePending(ref client._pendingWarehouseUnlockDelta, delta);
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown expansion delta area "
+                        + delta.Area + ".");
+            }
+
+            client.ApplyLatestState();
         }
 
         [HarmonyPatch(typeof(ExpansionShopUIScreen), "EvaluateCartCheckout")]
@@ -338,8 +361,7 @@ namespace CardShopCoop.Modules.Expansion
                     return;
                 }
 
-                Observe(__state, kind, () => __instance.EvaluateCartCheckout(__state.TotalCost,
-                    __state.Index, __state.IsShopB));
+                Observe(__state, kind);
             }
 
             [HarmonyFinalizer]
@@ -380,7 +402,7 @@ namespace CardShopCoop.Modules.Expansion
                     return;
                 }
 
-                Observe(__state, 2, () => __instance.OnPressUnlockShopB());
+                Observe(__state, 2);
             }
 
             [HarmonyFinalizer]

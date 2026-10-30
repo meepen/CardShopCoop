@@ -53,15 +53,20 @@ namespace CardShopCoop.Modules.Staff
         public float CardPriceMult;
         public List<StaffPackChange> PackChanges = new();
 
-        // The client registers this prediction through the explicit Apply/Undo closures in
-        // StaffClientBehaviour, and the host handler performs the worker operation itself, so the
-        // action hooks are never the applied path.
-        public override void OnApply()
-        {
-        }
+        /// <summary>The local prediction this intent observed. Local-only; never serialized.</summary>
+        [NonSerialized]
+        internal StaffClientBehaviour.StaffAction Action;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            StaffClientBehaviour.UndoAction(Action);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            var action = Action;
+            Action = null;
+            StaffClientBehaviour.MergeAction(action, response);
         }
     }
 
@@ -78,8 +83,6 @@ namespace CardShopCoop.Modules.Staff
     public sealed class StaffModuleDeltaMessage : INetMessage
     {
 
-        /// <summary>The prediction this delta answers, or empty for host-local worker state.</summary>
-        public Guid ActionId;
         public StaffDeltaKind Kind;
         /// <summary>The live worker this operation/state describes.</summary>
         public Worker Worker;
@@ -116,6 +119,14 @@ namespace CardShopCoop.Modules.Staff
     {
         public int Index;
         public bool Enabled;
+    }
+
+    /// <summary>The acting client's answer to one staff intent: every authoritative worker delta
+    /// the accepted operation produced, in order.</summary>
+    [NetworkMessage]
+    public sealed class StaffIntentResponse : ActionResponseMessage
+    {
+        public List<StaffModuleDeltaMessage> Deltas = new();
     }
 
     public struct StaffModuleEntry

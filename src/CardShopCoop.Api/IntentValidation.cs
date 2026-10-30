@@ -2,7 +2,8 @@ namespace CardShopCoop.Api
 {
     /// <summary>
     /// The result of one host intent validator. A denial is a normal outcome: the handler does not
-    /// run, the module's rejection hook (if any) runs, and an action intent is rolled back.
+    /// run, the module's rejection hook (if any) runs, and the client reverses a predicted action
+    /// with <see cref="ActionMessage.OnUndo"/>.
     /// </summary>
     public readonly struct IntentValidation
     {

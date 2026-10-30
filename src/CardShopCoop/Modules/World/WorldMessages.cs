@@ -7,34 +7,31 @@ using UnityEngine;
 
 namespace CardShopCoop.Modules.World
 {
-    /// <summary>Common correlation carried by authoritative world state. Every entity the message
-    /// addresses is a live scene reference; the identity module owns object/identity translation
-    /// on the wire. ActionId is non-empty only on the accepted delta that reconciles a client
-    /// intent.</summary>
+    /// <summary>
+    /// Authoritative shared-world state: a join baseline, a delta, or the post-action state a host
+    /// publishes for one action. <see cref="ActionId"/> correlates that state with the action that
+    /// caused it and is empty for baselines and unsolicited host state. State is not a command, so
+    /// this is a plain <see cref="INetMessage"/>.
+    /// </summary>
     public abstract class WorldStateMessage : INetMessage
     {
         public Guid ActionId;
     }
 
-    /// <summary>Internal control marker used by the ordered world-baseline lifecycle.</summary>
-    public abstract class WorldControlMessage : WorldStateMessage
+    /// <summary>Marks the start and end of the ordered world baseline one joining peer receives.</summary>
+    public abstract class WorldControlMessage : INetMessage
     {
     }
 
-    /// <summary>A client command against shared world state. The host applies it through the
-    /// module's own game path (handlers report <see cref="ActionOutcome"/> after running that
-    /// path), and the client's generic prediction is settled by the framework response or by the
-    /// authoritative echo the handler publishes first. The apply/reverse work lives in the
-    /// handler's game-path closures, so these hooks are intentionally empty.</summary>
+    /// <summary>
+    /// A predicted world interaction. The client applies the prediction through the game's own
+    /// path and sends it with <see cref="ICoopContext.Send"/> or <see cref="ICoopPeer.Send"/>; the
+    /// host applies it and answers with an <see cref="ActionResponseMessage"/>. A concrete message
+    /// overrides <see cref="ActionMessage.OnUndo"/> to reverse the prediction and
+    /// <see cref="ActionMessage.OnMerge"/> to apply the host's state and settle.
+    /// </summary>
     public abstract class WorldMessage : ActionMessage
     {
-        public override void OnApply()
-        {
-        }
-
-        public override void OnUndo(ActionResponseMessage response)
-        {
-        }
     }
 
     /// <summary>World command base used by the module's typed client intents.</summary>
@@ -106,6 +103,9 @@ namespace CardShopCoop.Modules.World
         public bool ContentsChanged;
         public EItemType ItemType;
         public int ItemCount;
+
+        public override void OnMerge(ActionResponseMessage response)
+            => WorldClientBehaviour.MergeBoxStateResult(response as BoxStateResult);
     }
 
     /// <summary>Host -> clients: authoritative box state. <see cref="PoseChanged"/> carries a
@@ -123,7 +123,7 @@ namespace CardShopCoop.Modules.World
         public Quaternion Rotation;
     }
 
-    /// <summary>Marks the end of the complete per-connection shared-world baseline.</summary>
+    /// <summary>Marks the start of the complete per-peer shared-world baseline.</summary>
     [NetworkMessage]
     public sealed class WorldBaselineStartMessage : WorldControlMessage
     {
@@ -134,34 +134,6 @@ namespace CardShopCoop.Modules.World
     public sealed class WorldBaselineCompleteMessage : WorldControlMessage
     {
         public long BaselineId;
-    }
-
-    internal static class WorldMessageMetadata
-    {
-        internal static string WorkbenchEntityId(int index)
-            => "workbench:" + index;
-
-        /// <summary>An intent is valid only when it carries its correlation id and every entity
-        /// it addresses resolved to a live scene object. A message whose entity did not resolve
-        /// is dropped, never resolved by a fallback id.</summary>
-        internal static bool IsValidIntent(WorldIntentMessage message)
-            => message != null && message.ActionId != Guid.Empty && HasLiveEntity(message);
-
-        private static bool HasLiveEntity(WorldIntentMessage message) => message switch
-        {
-            BoxDestroyRequestMessage destroy => destroy.BoxNetworkId != Guid.Empty,
-            BoxStateRequestMessage state => state.Box != null,
-            FurnitureBoxUpRequestMessage furniture => furniture.Entity != null,
-            FurnitureDestroyIntent furnitureDestroy => furnitureDestroy.Entity != null,
-            PlayerBoxInteractionRequestMessage playerBox => playerBox.Box != null,
-            ShelfInteractionRequestMessage shelf => shelf.Shelf != null,
-            WarehouseStoreMessage store => store.Shelf != null && store.Box != null,
-            WarehouseTakeMessage take => take.Source != null && take.Source.Shelf != null
-                && take.CreatedBox != null,
-            CardDisplayRequestMessage cardDisplay => cardDisplay.Shelf != null,
-            ContainerIntent container => container.Container != null,
-            _ => true,
-        };
     }
 
     /// <summary>Client intent to retire a furniture object the player sold or trashed while it was
@@ -181,6 +153,9 @@ namespace CardShopCoop.Modules.World
         public EObjectType ObjectType;
         public Vector3 Position;
         public InteractableObject Entity;
+
+        public override void OnUndo(ActionResponseMessage response)
+            => WorldClientBehaviour.UndoFurnitureBoxUpPrediction(Entity);
     }
 
     /// <summary>Location of one warehouse entry. The shelf is a live scene object; the
@@ -231,27 +206,6 @@ namespace CardShopCoop.Modules.World
     public sealed class WarehouseStateMessage : WorldStateMessage
     {
         public List<WarehouseCompartmentState> Compartments = new();
-    }
-
-    [NetworkMessage]
-    public sealed class WarehouseStoreMessage : WorldIntentMessage
-    {
-        public WarehouseShelf Shelf;
-        public int CompartmentIndex;
-        public InteractablePackagingBox Box;
-        public EItemType ItemType;
-        public int Amount;
-        public bool IsBig;
-    }
-
-    /// <summary>Client -> host: take the top entry of <see cref="Source"/>. The locally spawned
-    /// live box is a creation event and arrives as a descriptor with its own identity; it may keep
-    /// the stored entry's host id or carry a fresh one.</summary>
-    [NetworkMessage]
-    public sealed class WarehouseTakeMessage : WorldIntentMessage
-    {
-        public WarehouseShelfBoxRef Source;
-        public EntityDescriptor CreatedBox;
     }
 
     /// <summary>One accepted warehouse inventory change. <see cref="Ref"/> names the entry;

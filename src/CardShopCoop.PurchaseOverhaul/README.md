@@ -11,9 +11,10 @@ changing CardShopCoop core.
 - Host order: the host resolves those ids through Purchase Overhaul's own catalogue and calls
   `Checkout.PlaceRemote`. Purchase Overhaul owns pricing, volume/recycle discounts, validation,
   the wallet charge, deliveries and XP.
-- Guest result: the host returns `PurchaseOrderResult`. An accepted result runs
-  `OnMerge` and removes exactly the ordered lines from the guest's cart; a rejected result runs
-  `OnUndo` and leaves the cart intact with the host's message.
+- Guest result: the host returns `PurchaseOrderResult`, settled in the request's `OnMerge`. An
+  accepted result removes exactly the ordered lines from the guest's cart; a rejected result
+  leaves the cart intact with the host's message. The guest never charges itself, so the action
+  has no local prediction and needs no `OnUndo`.
 - Product licences use the same flow through `Checkout.BuyLicense`; the host's
   `CPlayerData.SetUnlockItemLicense` is observed by CardShopCoop's Catalog module, so the
   entitlement reaches the guest normally.

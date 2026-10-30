@@ -1,10 +1,11 @@
 using System;
+using CardShopCoop.Api;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Decoration;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using CardShopCoop.Util;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
@@ -635,7 +636,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         private static GameObjectIdentityDecorationClientBehaviour Active;
         private static int _suppress;
 
-        private readonly Dictionary<Guid, Preview> _previews = new();
         private readonly Dictionary<InteractableObject, DecorationPose> _moveOrigins =
             new(ReferenceComparer.Instance);
         private InteractableObject _placing;
@@ -665,7 +665,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             Active = this;
             _suppress = 0;
-            ActionLedger.ActionSettled += OnActionSettled;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
             Patch(Harmony, typeof(ShelfManager), "Awake", Type.EmptyTypes,
@@ -695,13 +694,12 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
         private bool CanPredict()
             => !_shutdown && _joined && RuntimeContext.InGame()
-                && ActionLedger.IsActive && !ActionLedger.IsReconciling && !ActionLedger.IsApplying
+                && !ReentrancyGuard.Suppressed(this)
                 && _suppress == 0 && DecorationInterop.IsSceneReady();
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
             // Previews and the placement marker belong to the outgoing scene.
-            _previews.Clear();
             _moveOrigins.Clear();
             _placing = null;
             _placingWasBound = false;
@@ -736,7 +734,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             }
 
             _joined = false;
-            _previews.Clear();
             _moveOrigins.Clear();
             _placing = null;
         }
@@ -785,7 +782,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             }
 
             _shutdown = true;
-            ActionLedger.ActionSettled -= OnActionSettled;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(Active, this))
@@ -793,7 +789,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 Active = null;
             }
 
-            _previews.Clear();
             _moveOrigins.Clear();
             _placing = null;
             _joined = false;
@@ -814,78 +809,15 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             return -(((long)connection << 32) + _proposalSequence);
         }
 
-        private void Predict(DecorationIntentMessage message, string key, Action apply, Action undo,
-            Preview preview = null)
+        private void Predict(DecorationIntentMessage message, IDecorationPrediction prediction)
         {
             if (!CanPredict())
             {
                 return;
             }
 
-            ActionLedger.Submit(key, actionId =>
-            {
-                message.ActionId = actionId;
-                if (preview != null)
-                {
-                    _previews[actionId] = preview;
-                }
-
-                RuntimeContext.Send(1, message);
-            }, apply, undo);
-        }
-
-        private void OnActionSettled(Guid actionId)
-        {
-            if (!_previews.TryGetValue(actionId, out var preview))
-            {
-                return;
-            }
-
-            _previews.Remove(actionId);
-
-            // The host confirmed the piece by binding the same id as a client entity. Only a
-            // still-proposed preview is a local object the host never accepted.
-            if (GameObjectIdentityCache.TryResolve(preview.Id, out var current)
-                && ReferenceEquals(current, preview.Object)
-                && GameObjectIdentityCache.OwnershipOf(preview.Id) == GameObjectOwnership.ClientProposed)
-            {
-                GameObjectIdentityApi.Unbind(preview.Object);
-                using (SuppressPrediction())
-                {
-                    DecorationInterop.RemoveLocalPlacedObject(preview.Object);
-                }
-            }
-        }
-
-        private void ApplyPlacePreview(Preview preview, GameObjectId proposed, long existingId,
-            DecorationPose pose)
-        {
-            if (preview != null && preview.Generation != DecorationInterop.Generation)
-            {
-                return;
-            }
-
-            var instance = preview?.Object;
-            if (instance == null)
-            {
-                // An earlier undo in the same reconcile removed the preview. The prediction still
-                // owns that creation, so replay it from the descriptor it recorded.
-                var id = proposed.IsValid ? proposed : GameObjectId.Decoration(existingId);
-                var descriptor = DecorationIdentityAdapter.ToDescriptor(id, pose);
-                DecorationIdentityAdapter.CreateBound(descriptor, proposed.IsValid, out instance);
-                if (preview != null)
-                {
-                    preview.Object = instance;
-                }
-            }
-
-            if (instance == null)
-            {
-                return;
-            }
-
-            DecorationInterop.ApplyPredictedPose(instance, pose);
-            SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
+            message.Prediction = prediction;
+            Context.Send(message);
         }
 
         private void UndoPlacePreview(Preview preview, GameObjectId proposed, long existingId,
@@ -917,23 +849,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             }
         }
 
-        private void ApplyRemovePreview(BoxState state)
-        {
-            var instance = state.Instance;
-            if (instance == null
-                && !DecorationIdentityAdapter.TryResolve(state.Id.Value, out instance))
-            {
-                return;
-            }
-
-            DecorationInterop.FinalizeMovedObject(instance);
-            GameObjectIdentityApi.Unbind(instance);
-            using (SuppressPrediction())
-            {
-                DecorationInterop.RemoveLocalPlacedObject(instance);
-            }
-        }
-
         private void UndoRemovePreview(BoxState state)
         {
             if (state.Before == null || state.Before.Generation != DecorationInterop.Generation)
@@ -959,6 +874,79 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             var descriptor = DecorationIdentityAdapter.ToDescriptor(state.Id, state.Pose);
             DecorationIdentityAdapter.CreateBound(descriptor, proposed: false, out _);
+        }
+
+        /// <summary>One predicted placement: reverses the local preview on rejection and settles
+        /// it against the host's response on every resolution.</summary>
+        private sealed class PlacePrediction : IDecorationPrediction
+        {
+            private readonly GameObjectIdentityDecorationClientBehaviour _owner;
+            private readonly Preview _preview;
+            private readonly GameObjectId _proposed;
+            private readonly long _existingId;
+            private readonly DecorationPose _original;
+
+            internal PlacePrediction(GameObjectIdentityDecorationClientBehaviour owner,
+                Preview preview, GameObjectId proposed, long existingId, DecorationPose original)
+            {
+                _owner = owner;
+                _preview = preview;
+                _proposed = proposed;
+                _existingId = existingId;
+                _original = original;
+            }
+
+            public void Undo()
+                => _owner.UndoPlacePreview(_preview, _proposed, _existingId, _original);
+
+            public void Merge(ActionResponseMessage response)
+            {
+                _owner.SettlePlacePreview(_preview);
+                DecorationClientBehaviour.ApplyResponseState(response);
+            }
+        }
+
+        /// <summary>One predicted removal: restores the boxed piece on rejection and merges the
+        /// host's response state.</summary>
+        private sealed class RemovePrediction : IDecorationPrediction
+        {
+            private readonly GameObjectIdentityDecorationClientBehaviour _owner;
+            private readonly BoxState _state;
+
+            internal RemovePrediction(GameObjectIdentityDecorationClientBehaviour owner,
+                BoxState state)
+            {
+                _owner = owner;
+                _state = state;
+            }
+
+            public void Undo()
+                => _owner.UndoRemovePreview(_state);
+
+            public void Merge(ActionResponseMessage response)
+                => DecorationClientBehaviour.ApplyResponseState(response);
+        }
+
+        /// <summary>The host confirmed the piece by binding the same id as a client entity. Only a
+        /// still-proposed preview is a local object the host never accepted, so drop it and leave
+        /// the authoritative lifecycle object in place.</summary>
+        private void SettlePlacePreview(Preview preview)
+        {
+            if (preview == null)
+            {
+                return;
+            }
+
+            if (GameObjectIdentityCache.TryResolve(preview.Id, out var current)
+                && ReferenceEquals(current, preview.Object)
+                && GameObjectIdentityCache.OwnershipOf(preview.Id) == GameObjectOwnership.ClientProposed)
+            {
+                GameObjectIdentityApi.Unbind(preview.Object);
+                using (SuppressPrediction())
+                {
+                    DecorationInterop.RemoveLocalPlacedObject(preview.Object);
+                }
+            }
         }
 
         private static class Hooks
@@ -1053,10 +1041,8 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 };
                 CoopPlugin.Log.LogInfo("[identity] decoration place intent id=" + id
                     + " new=" + proposed.IsValid + " type=" + pose.DecorationType + ".");
-                client.Predict(message, "decoration:" + id,
-                    () => client.ApplyPlacePreview(preview, proposed, existingId, pose),
-                    () => client.UndoPlacePreview(preview, proposed, existingId, original),
-                    proposed.IsValid ? preview : null);
+                client.Predict(message,
+                    new PlacePrediction(client, preview, proposed, existingId, original));
             }
 
             internal static void BoxUpObjectPrefix(InteractableObject __instance,
@@ -1105,9 +1091,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 };
                 CoopPlugin.Log.LogInfo("[identity] decoration remove intent id="
                     + __state.Id + " type=" + __state.Type + ".");
-                client.Predict(message, "decoration:" + __state.Id.Value,
-                    () => client.ApplyRemovePreview(__state),
-                    () => client.UndoRemovePreview(__state));
+                client.Predict(message, new RemovePrediction(client, __state));
             }
 
             /// <summary>Expansion and warehouse expansion hide the blocker and return its vertical

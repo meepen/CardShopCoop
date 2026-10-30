@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -65,7 +64,7 @@ namespace CardShopCoop.Modules.Register
 
         private void TrackOwnership(Guid id, InteractableCashierCounter counter, bool claim)
         {
-            if (id == Guid.Empty || counter == null || !ActionLedger.IsPending(id))
+            if (id == Guid.Empty || counter == null)
             {
                 return;
             }
@@ -77,33 +76,43 @@ namespace CardShopCoop.Modules.Register
             }
         }
 
-        private void OnActionSettled(Guid id)
+        /// <summary>True when <paramref name="actionId"/> is this client's in-flight action for
+        /// the counter. This replaces the old per-counter ledger query: the intent that was sent
+        /// owns the counter until its own answer arrives.</summary>
+        internal bool IsPendingActionFor(InteractableCashierCounter counter, Guid actionId)
+            => actionId != Guid.Empty && _actionCounters.TryGetValue(actionId, out var pending)
+                && ReferenceEquals(pending, counter);
+
+        private bool HasPendingAction(InteractableCashierCounter counter)
         {
-            _ownershipActions.Remove(id);
-            _claimActions.Remove(id);
-            if (_actionCounters.TryGetValue(id, out var counter) && counter != null)
+            foreach (var pending in _actionCounters.Values)
             {
-                _actionCounters.Remove(id);
-                // A settled action must reconcile the store even when no re-anchor was sent. The
-                // host may have refused it before the counter could be resolved, so the last
-                // authoritative snapshot is the restore script.
-                _awaiting.Add(counter);
-            }
-            else
-            {
-                _actionCounters.Remove(id);
+                if (ReferenceEquals(pending, counter))
+                {
+                    return true;
+                }
             }
 
-            if (_awaiting.Count > 0)
-            {
-                OnReadinessSignal();
-            }
+            return false;
         }
 
-        private void OnActionReconciled(Guid _)
+        /// <summary>Settles one register action after its authoritative state (or its rejection)
+        /// has been applied exactly once. Queues the counter so the store's latest snapshot is the
+        /// restore script even when the host refused before resolving the counter.</summary>
+        internal void Settle(RegisterIntent message)
         {
-            if (_awaiting.Count > 0)
+            if (_shutdown || message == null)
             {
+                return;
+            }
+
+            var id = message.ActionId;
+            _ownershipActions.Remove(id);
+            _claimActions.Remove(id);
+            _actionCounters.Remove(id);
+            if (message.Counter != null)
+            {
+                _awaiting.Add(message.Counter);
                 OnReadinessSignal();
             }
         }
@@ -177,8 +186,6 @@ namespace CardShopCoop.Modules.Register
             SceneManager.sceneLoaded += OnSceneLoaded;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged += OnReadinessSignal;
-            ActionLedger.ActionSettled += OnActionSettled;
-            ActionLedger.ActionReconciled += OnActionReconciled;
             // Registers are addressed by their stable placement key; the key only resolves once
             // the placement channel has bound this peer's counter identities, so retry the pending
             // register states whenever that structure changes.
@@ -212,10 +219,9 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            // Defer only while this behaviour is itself rendering/applying, or the ledger is
-            // replaying. A handler dispatch must not defer: the snapshot arrives through a handler
-            // and is rendered from here.
-            if (_rendering || Writes.Active || ActionLedger.IsApplying || ActionLedger.IsReconciling)
+            // Defer only while this behaviour is itself rendering. A handler dispatch must not
+            // defer: the snapshot arrives through a handler and is rendered from here.
+            if (_rendering || Writes.Active)
             {
                 _rerun = true;
                 return;
@@ -369,8 +375,6 @@ namespace CardShopCoop.Modules.Register
             ShutdownContents();
             NpcClientBehaviour.CustomerManagerReady -= OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged -= OnReadinessSignal;
-            ActionLedger.ActionSettled -= OnActionSettled;
-            ActionLedger.ActionReconciled -= OnActionReconciled;
             PlacementApi.StructureChanged -= OnPlacementStructureChanged;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))

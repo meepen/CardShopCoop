@@ -1,15 +1,14 @@
-using System;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Actions
 {
+    /// <summary>
+    /// The framework-owned decision sent when an action has no custom response payload: the
+    /// accepted/rejected flag is all the client needs to settle its prediction.
+    /// </summary>
     [NetworkMessage]
-    public sealed class ActionRollbackMessage : INetMessage
+    internal sealed class ActionDecisionMessage : ActionResponseMessage
     {
-        public Guid ActionId;
-        /// <summary>True for a rejection (undo the optimistic local action). False when the host
-        /// applied the action but its handler failed before publishing authority: retire the local
-        /// action without undoing it.</summary>
-        public bool Undo = true;
     }
 }

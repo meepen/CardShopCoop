@@ -1,8 +1,8 @@
 using CardShopCoop.Util;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using CardShopCoop.Modules.Catalog;
-using CardShopCoop.Modules.Actions;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -46,13 +46,15 @@ namespace CardShopCoop.Modules.World
 
         // client -> host op codes (first byte of a ContainerOp payload)
 
-        /// <summary>Set by WorldCardInteraction: the client -> host container intent.</summary>
+        /// <summary>Set by WorldCardInteraction: the client -> host container action send seam.</summary>
         public Action<INetMessage> SendOp;
         /// <summary>Set by WorldCardInteraction: host -> clients state (ContainerStateMessage).</summary>
         public Action<INetMessage> BroadcastState;
-        public Action<int, INetMessage> SendToClient;
+        /// <summary>Host -> one peer, for the actor-only state a response cannot carry (a pack
+        /// claim's token and output).</summary>
+        public Action<ICoopPeer, INetMessage> SendToClient;
         /// <summary>Host -> every client except one, for the per-actor hold flags.</summary>
-        internal Action<int, INetMessage> RelayState;
+        internal Action<ICoopPeer, INetMessage> RelayState;
         internal Func<bool> InGameProvider;
         internal Func<bool> ReloadingProvider;
 
@@ -135,6 +137,14 @@ namespace CardShopCoop.Modules.World
             public List<CompactCardDataAmount> Cards;
         }
 
+        /// <summary>Client-only side effects of one in-flight container action, registered when
+        /// the action is sent and released by its OnMerge hook.</summary>
+        private sealed class PendingClientAction
+        {
+            internal Action Undo;
+            internal Action Refused;
+        }
+
         /// <summary>Pre-action snapshot for an observed pack-opener click. Vanilla
         /// <c>OnMouseButtonUp</c> consumes the machine's processing/output, so the postfix cannot
         /// read the pre-click state from the machine; this captures what vanilla is about to act
@@ -207,14 +217,19 @@ namespace CardShopCoop.Modules.World
         // click sends OpPackClaim until the collect completes or is rolled back. The host's own
         // claim maps are _packClaimOwner/_packClaimToken.
         private readonly HashSet<int> _claimedPackIndices = new();
-        // The prediction ids of this peer's pack inserts still in flight. Their echoes reconcile in
-        // layers (see ClientApplyDelta) instead of applying the stale record raw.
-        private readonly HashSet<Guid> _pendingPackInserts = new();
+        // Client: the local side effects of every container action still in flight, keyed by the
+        // action instance. Registered when the action is sent and released by its OnMerge hook,
+        // which the ledger always calls exactly once.
+        private readonly Dictionary<ContainerIntent, PendingClientAction> _pendingClientActions = new();
         private int _nextPackClaimToken = 1;
         private readonly BoxNetworkInteraction _boxes;
         private readonly PlayerBoxInteraction _playerBox;
+        // Per-operation host scratch: the authenticated actor and the actor-only post-action state
+        // the handler returns as the action's response. Set and cleared in HostApplyIntent.
         private Guid _hostActionId;
         private int _hostActorConnectionId;
+        private ICoopPeer _hostActor;
+        private ContainerActionResult _hostActorResult;
         private InteractablePackagingBox _hostDeltaBox;
         private bool _hostDeltaTakeIntoHand;
         private bool _hostDeltaReleaseHold;
@@ -257,13 +272,15 @@ namespace CardShopCoop.Modules.World
             _cachedContainerScreen = null;
             _cachedAmountModal = null;
             _claimedPackIndices.Clear();
-            _pendingPackInserts.Clear();
+            _pendingClientActions.Clear();
             _pendingPackCollections.Clear();
             _packClaimOwner.Clear();
             _packClaimToken.Clear();
             _nextPackClaimToken = 1;
             _hostActionId = Guid.Empty;
             _hostActorConnectionId = 0;
+            _hostActor = null;
+            _hostActorResult = null;
             _hostDeltaBox = null;
             _hostDeltaTakeIntoHand = false;
             _hostDeltaReleaseHold = false;
@@ -458,30 +475,37 @@ namespace CardShopCoop.Modules.World
                 ActionId = _hostActionId,
                 Container = container,
                 Record = record,
-                Box = _hostDeltaBox,
-                TakeIntoHand = _hostDeltaTakeIntoHand,
-                ReleaseHold = _hostDeltaReleaseHold,
+                // The actor's own hand changes travel on the action response, never on a
+                // broadcast: another peer must not grab or drop a box that is not its own.
+                Box = null,
+                TakeIntoHand = false,
+                ReleaseHold = false,
                 CompletePackCollection = _hostCompletePackCollection,
             };
 
-            // TakeIntoHand / ReleaseHold describe the acting player's own hands. Only the intent's
-            // sender may apply them; every other peer receives the same record/box state with both
-            // flags cleared, or it would grab/drop a box that is not its own.
-            var actor = _hostActorConnectionId;
-            if (actor > 0 && (delta.TakeIntoHand || delta.ReleaseHold)
-                && SendToClient != null && RelayState != null)
+            var actor = _hostActor;
+            if (actor != null)
             {
-                SendToClient(actor, delta);
-                RelayState(actor, new ContainerDeltaMessage
+                // The acting client settles through its action response, which carries the same
+                // post-action record plus its own hand flags; every other peer gets the delta.
+                _hostActorResult = new ContainerActionResult
                 {
-                    ActionId = delta.ActionId,
-                    Container = delta.Container,
-                    Record = delta.Record,
-                    Box = delta.Box,
-                    TakeIntoHand = false,
-                    ReleaseHold = false,
-                    CompletePackCollection = delta.CompletePackCollection,
-                });
+                    Container = container,
+                    Record = record,
+                    Box = _hostDeltaBox,
+                    TakeIntoHand = _hostDeltaTakeIntoHand,
+                    ReleaseHold = _hostDeltaReleaseHold,
+                    CompletePackCollection = _hostCompletePackCollection,
+                };
+                if (RelayState != null)
+                {
+                    RelayState(actor, delta);
+                }
+                else
+                {
+                    BroadcastState?.Invoke(delta);
+                }
+
                 return;
             }
 
@@ -495,7 +519,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            Guarded("change", () => SendHostRecord(container));
+            SendHostRecord(container);
         }
 
         private ContainerRecord BuildRecord(InteractableObject container)
@@ -603,24 +627,29 @@ namespace CardShopCoop.Modules.World
 
         // ---------------- host: apply client ops ----------------
 
-        public bool HostApplyIntent(ContainerIntent message, int connId,
-            Action<INetMessage> response = null)
+        /// <summary>
+        /// Host: applies one container action itself and reports the outcome to the framework. The
+        /// resulting record is published to every other peer as a delta and returned to the acting
+        /// client in the response; its own hand flags travel only on that response.
+        /// </summary>
+        public ActionOutcome HostApplyIntent(ContainerIntent message, CoopMessageContext context)
         {
-            if (message == null || connId <= 0)
+            if (message == null || context?.Peer == null)
             {
-                return false;
+                return ActionOutcome.Reject("container action has no authenticated sender");
             }
 
             var op = message.GetType().Name;
             var accepted = false;
             var reason = (string)null;
             InteractablePackagingBox createdBox = null;
+            ContainerActionResult response = null;
             var container = message.Container;
             if (container == null)
             {
                 CoopPlugin.Log.LogWarning("[containers] dropped op=" + op
                     + ": the container did not resolve to a live object.");
-                return false;
+                return ActionOutcome.Reject("container did not resolve to a live object");
             }
 
             var kind = KindOf(container);
@@ -629,11 +658,13 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning("[containers] dropped op=" + op + " for "
                     + container.name + ": the container is not in its live placement list.");
-                return false;
+                return ActionOutcome.Reject("container is not in its live placement list");
             }
 
             _hostActionId = message.ActionId;
-            _hostActorConnectionId = connId;
+            _hostActorConnectionId = context.Peer.Player?.Id ?? 0;
+            _hostActor = context.Peer;
+            _hostActorResult = null;
             try
             {
                 do
@@ -828,14 +859,20 @@ namespace CardShopCoop.Modules.World
                     else if (message is PackClaimIntent)
                     {
                         accepted = HostApplyPackClaim(container as InteractableAutoPackOpener, idx,
-                            connId, out reason, response);
+                            _hostActorConnectionId, out reason);
+                        if (accepted)
+                        {
+                            // Publish the claimed record so the actor's response and every
+                            // observer agree that the output is now owned by this claim.
+                            HostChanged(container);
+                        }
                         break;
                     }
                     else if (message is PackCollectIntent collect)
                     {
                         var opener = container as InteractableAutoPackOpener;
-                        accepted = HostApplyPackCollect(opener, idx, collect.ClaimToken, connId,
-                            out reason);
+                        accepted = HostApplyPackCollect(opener, idx, collect.ClaimToken,
+                            _hostActorConnectionId, out reason);
                         if (accepted)
                         {
                             _hostCompletePackCollection = true;
@@ -943,7 +980,7 @@ namespace CardShopCoop.Modules.World
                                 // The taker's own pickup was a covered forward that raced
                                 // ahead of the box's creation; announce the grant so the host
                                 // knows the box is held and observers attach it to the avatar.
-                                _playerBox?.AnnounceGrantedHold(createdBox, connId);
+                                _playerBox?.AnnounceGrantedHold(createdBox, _hostActorConnectionId);
                             }
                         }
                         break;
@@ -972,30 +1009,41 @@ namespace CardShopCoop.Modules.World
                         reason = "unknown container operation";
                     }
                 } while (false);
+                response = _hostActorResult;
             }
-            catch (Exception e)
+            finally
             {
-                // Reliable-message handler boundary. An unexpected failure here propagated out of
-                // the handler and disconnected the peer (spamming an empty-box take hit the
-                // "created box has no authoritative descriptor" race). Report the op as rejected
-                // and let the requesting client roll its prediction back instead.
-                CoopPlugin.Log.LogError("WorldContainerInteraction op=" + op + " kind=" + kind
-                    + " index=" + idx + " failed: " + e);
-                reason = "container operation failed";
+                _hostActionId = Guid.Empty;
+                _hostActorConnectionId = 0;
+                _hostActor = null;
+                _hostActorResult = null;
+                _hostDeltaBox = null;
+                _hostDeltaTakeIntoHand = false;
+                _hostDeltaReleaseHold = false;
+                _hostCompletePackCollection = false;
             }
 
-            if (!accepted && reason != null)
+            if (!accepted)
             {
+                reason ??= "container operation was not applied";
                 CoopPlugin.Log.LogWarning("WorldContainerInteraction rejected op=" + op
                     + " kind=" + kind + " index=" + idx + ": " + reason);
+                return ActionOutcome.Reject(reason, BuildRejectedResult(container));
             }
-            _hostActionId = Guid.Empty;
-            _hostActorConnectionId = 0;
-            _hostDeltaBox = null;
-            _hostDeltaTakeIntoHand = false;
-            _hostDeltaReleaseHold = false;
-            _hostCompletePackCollection = false;
-            return accepted;
+
+            return ActionOutcome.Applied(response);
+        }
+
+        /// <summary>Host: the authoritative state a refused container action merges back to. It
+        /// carries the container's current record and nothing that would move the actor's hand.</summary>
+        private ContainerActionResult BuildRejectedResult(InteractableObject container)
+        {
+            var record = container == null ? default : BuildRecord(container);
+            return new ContainerActionResult
+            {
+                Container = container,
+                Record = record,
+            };
         }
 
         private bool HostTakeEmptyBox(InteractableEmptyBoxStorage storage, Guid creatorId,
@@ -1144,7 +1192,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private bool HostApplyPackClaim(InteractableAutoPackOpener p, int idx, int connId,
-            out string reason, Action<INetMessage> response = null)
+            out string reason)
         {
             reason = null;
             var output = p?.GetCompactCardDataAmountList();
@@ -1179,14 +1227,14 @@ namespace CardShopCoop.Modules.World
 
             CoopPlugin.Log.LogInfo("[pack] claim opener=" + idx + ": " + claimCards + " card(s) in "
                 + output.Count + " entr(ies).");
-            if (response != null)
+            var actor = _hostActor;
+            if (actor == null || SendToClient == null)
             {
-                response(claim);
+                reason = "pack claim has no recipient";
+                return false;
             }
-            else
-            {
-                SendToClient?.Invoke(connId, claim);
-            }
+
+            SendToClient(actor, claim);
             // Register the claim only once the reply was handed to the transport. A throwing
             // send must not leave the opener locked behind a claim the client never received
             // (HostApplyPackClaim refuses any further claim while the key is owned).
@@ -1352,6 +1400,9 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Client: applies another peer's authoritative container delta. The acting
+        /// client's own post-action state arrives on its action response instead, so this is
+        /// always a remote change; an absolute record is safe to apply as-is.</summary>
         public void ClientApplyDelta(ContainerDeltaMessage message)
         {
             if (message == null)
@@ -1366,66 +1417,65 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            // An insert echo reconciles in layers: the record was built before any newer local
-            // inserts still in flight, and applying it raw trimmed those newer optimistic entries
-            // away - the pack count that bounced down and back up while a guest fed a machine.
-            if (_pendingPackInserts.Remove(message.ActionId))
+            ApplyContainerResult(message.Container, message.Record, message.Box,
+                message.TakeIntoHand, message.ReleaseHold, message.CompletePackCollection);
+        }
+
+        /// <summary>Applies the post-action state of one container change: the record, the actor's
+        /// hand flags, and the collection completion. Shared by the delta handler (other peers)
+        /// and the action merge (the acting client), so both paths converge identically.</summary>
+        private void ApplyContainerResult(InteractableObject container, ContainerRecord record,
+            InteractablePackagingBox box, bool takeIntoHand, bool releaseHold,
+            bool completePackCollection)
+        {
+            if (record.Container == null)
             {
-                WorldAction.ApplyAuthoritative(message, () => ApplyDeltaRecord(message));
-            }
-            else
-            {
-                // Every other record is an absolute state-set: retire this peer's own prediction
-                // (the game already applied it) or apply another peer's change directly.
-                WorldAction.Confirm(message, () => ApplyDeltaRecord(message));
+                record.Container = container;
             }
 
-            if (message.Box != null)
+            ApplyRecord(record);
+            ApplyActorHandoffs(container, box, takeIntoHand, releaseHold, completePackCollection);
+        }
+
+        /// <summary>Applies the parts of a container result that belong to the acting player's own
+        /// hands: the box a take grants, the release a store performs, and the collect completion
+        /// only the claimant tracks.</summary>
+        private void ApplyActorHandoffs(InteractableObject container, InteractablePackagingBox box,
+            bool takeIntoHand, bool releaseHold, bool completePackCollection)
+        {
+            if (box != null)
             {
-                if (message.TakeIntoHand && message.Box is InteractablePackagingBox_Item item)
+                if (takeIntoHand && box is InteractablePackagingBox_Item item)
                 {
                     TakeIntoLocalHand(item);
                 }
             }
-            else if (message.TakeIntoHand)
+            else if (takeIntoHand)
             {
                 CoopPlugin.Log.LogWarning(
-                    "[containers] delta asked to take a box into the hand, but the box did not "
+                    "[containers] state asked to take a box into the hand, but the box did not "
                     + "resolve to a live object.");
             }
 
-            if (message.ReleaseHold)
+            if (releaseHold)
             {
                 // Release through the game's own path so the held box's flag and the controller's
                 // current box clear together.
                 _playerBox?.ReleaseLocalHold();
             }
 
-            if (message.CompletePackCollection)
+            if (completePackCollection)
             {
-                // The delta is broadcast to every peer, but only the claimant ever created a
-                // pending collection (the host sends ContainerPackClaimMessage to the claimant
-                // alone). Observers therefore have nothing to apply here and must not reveal or
+                // Only the claimant ever created a pending collection (the host answers the claim
+                // to that peer alone). Observers have nothing to apply here and must not reveal or
                 // bank on the claimant's behalf.
-                var opener = message.Container as InteractableAutoPackOpener;
+                var opener = container as InteractableAutoPackOpener;
                 var idx = opener == null ? -1 : IndexOf(KindPackOpener, opener);
                 if (idx >= 0 && _pendingPackCollections.ContainsKey(idx))
                 {
                     CompletePackCollection(idx);
                 }
             }
-        }
-
-        /// <summary>Applies the single record a delta carries.</summary>
-        private void ApplyDeltaRecord(ContainerDeltaMessage message)
-        {
-            var record = message.Record;
-            if (record.Container == null)
-            {
-                record.Container = message.Container;
-            }
-
-            ApplyRecord(record);
         }
 
         /// <summary>Retires the local claim bookkeeping once the host's collect delta arrives.
@@ -1876,12 +1926,11 @@ namespace CardShopCoop.Modules.World
                     {
                         Container = p,
                     };
-                    // Vanilla already turned the machine on; the prediction only records how to
-                    // replay/undo the turn-on if a later rejection unwinds it.
-                    WorldAction.Submit(WorldAction.ContainersScope, command,
-                        () => ApplyPackRunning(p),
-                        () => ApplyPackSnapshot(p, observe.PriorProcessing, observe.PriorState,
-                            observe.PriorOpened, observe.PriorTimer));
+                    // Vanilla already turned the machine on; the undo puts the machine back to the
+                    // exact pre-click pack fields if the host refuses the turn-on.
+                    SendClientAction(command, undo: () => ApplyPackSnapshot(p,
+                        observe.PriorProcessing, observe.PriorState, observe.PriorOpened,
+                        observe.PriorTimer));
                 }
                 else
                 {
@@ -1900,34 +1949,21 @@ namespace CardShopCoop.Modules.World
                     return;
                 }
                 // Vanilla already ran the collect branch; the claim only asks the host to mint the
-                // authoritative output.
+                // authoritative output. A refusal relinquishes the local claim so a later click
+                // can try again.
                 _claimedPackIndices.Add(idx);
                 var claim = new PackClaimIntent
                 {
                     Container = p,
                 };
-                WorldAction.Submit(WorldAction.ContainersScope, claim,
-                    () => _claimedPackIndices.Add(idx),
-                    () => _claimedPackIndices.Remove(idx));
+                SendClientAction(claim,
+                    undo: () => _claimedPackIndices.Remove(idx),
+                    refused: () => AbandonPackCollection(idx));
             }
             else
             {
                 NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.WaitAllCardPacksToBeProcessed);
             }
-        }
-
-        /// <summary>Replays the authoritative turn-on through the machine's own fields (a
-        /// prediction follower after a later rollback).</summary>
-        private static void ApplyPackRunning(InteractableAutoPackOpener p)
-        {
-            ApplyingRemote = true;
-            try
-            {
-                FiPoIsProcessing?.SetValue(p, true);
-                p.m_CurrentState = 1;
-                PaintPackUI(p);
-            }
-            finally { ApplyingRemote = false; }
         }
 
         /// <summary>Restores the machine's pre-click pack fields for a rolled-back turn-on.</summary>
@@ -1975,55 +2011,16 @@ namespace CardShopCoop.Modules.World
                     BoxNetworkId = boxId,
                     IsPlayer = true,
                 };
-                // The observation records the storage count so a rejection can restore it; vanilla
-                // already decremented it.
-                WorldAction.Submit(WorldAction.ContainersScope, command,
-                    () =>
-                    {
-                        var count = storage.GetBoxStoredCount();
-                        FiEmptyStoredCount.SetValue(storage, count - 1);
-                        MiEmptyEvaluateStack.Invoke(storage, null);
-                    },
-                    () =>
-                    {
-                        var count = storage.GetBoxStoredCount();
-                        FiEmptyStoredCount.SetValue(storage, count + 1);
-                        MiEmptyEvaluateStack.Invoke(storage, null);
-                    });
-            }
-        }
-
-        /// <summary>Replays an observed empty-box store through the game's own store path. The
-        /// stored box is a host-owned identity, so if a replay outlived the object (vanilla
-        /// destroyed it), the id is rematerialized before the store runs.</summary>
-        private void ApplyEmptyBoxStored(InteractableEmptyBoxStorage storage, Guid boxId)
-        {
-            if (storage == null)
-            {
-                return;
-            }
-
-            if (!_boxes.TryGetBox(boxId, out var box)
-                || box is not InteractablePackagingBox_Item item)
-            {
-                if (!_boxes.ClientEnsureWarehouseTake(boxId, EItemType.None, 0, true, out item))
+                // Vanilla already took the box and decremented the count. A refusal puts the count
+                // back and discards the locally created box the host never accepted.
+                SendClientAction(command, undo: () =>
                 {
-                    CoopPlugin.Log.LogWarning("Empty-box store replay could not restore box "
-                        + boxId + "; skipping.");
-                    return;
-                }
-            }
-
-            ApplyingRemote = true;
-            _boxes.BeginContainerConsume();
-            try
-            {
-                storage.StoreBox(item, false);
-            }
-            finally
-            {
-                _boxes.EndContainerConsume();
-                ApplyingRemote = false;
+                    var count = storage.GetBoxStoredCount();
+                    FiEmptyStoredCount.SetValue(storage, count + 1);
+                    MiEmptyEvaluateStack.Invoke(storage, null);
+                    _playerBox?.ReleaseLocalHold(boxId);
+                    _boxes.RollbackClientCreated(new[] { boxId });
+                });
             }
         }
 
@@ -2098,12 +2095,10 @@ namespace CardShopCoop.Modules.World
                 Cards = new List<CompactCardDataAmount>(pending.Cards),
             };
             // The host's claim already handed us the cards; the collect forwards that exact claim.
-            // The collect itself is a no-op prediction: the claimant's vanilla collect already ran
-            // (and already banked and revealed), so there is nothing to apply or undo in the game.
-            // A rejection only clears the claim bookkeeping that otherwise keeps a stale token
-            // alive and resubmitting forever.
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () => { }, () => { }, () => AbandonPackCollection(idx));
+            // The collect itself mutates nothing locally: the claimant's vanilla collect already ran
+            // (and already banked and revealed). A refusal clears the claim bookkeeping that would
+            // otherwise keep a stale token alive and resubmit forever.
+            SendClientAction(command, refused: () => AbandonPackCollection(idx));
             return true;
         }
 
@@ -2117,6 +2112,107 @@ namespace CardShopCoop.Modules.World
                 + idx + "; clearing local claim.");
             _pendingPackCollections.Remove(idx);
             _claimedPackIndices.Remove(idx);
+        }
+
+        // ---------------- client: prediction lifecycle ----------------
+
+        /// <summary>Client: reverses a container action's local prediction. Called by the action's
+        /// own OnUndo, which the framework runs only when the host rejects it.</summary>
+        internal static void UndoClientAction(ContainerIntent action)
+            => Current?.UndoPending(action);
+
+        /// <summary>Client: settles a container action, applying the host's post-action record
+        /// and, on a refusal, the action's own local cleanup. Called exactly once per
+        /// resolution.</summary>
+        internal static void MergeClientAction(ContainerIntent action, ActionResponseMessage response)
+            => Current?.MergePending(action, response);
+
+        /// <summary>Client: sends one predicted container action through the public send seam.
+        /// The optional closures are local artifacts for a refusal, kept until the action's own
+        /// merge releases them.</summary>
+        private void SendClientAction(ContainerIntent command, Action undo = null,
+            Action refused = null)
+        {
+            if (command == null)
+            {
+                return;
+            }
+
+            if (SendOp == null)
+            {
+                CoopPlugin.Log.LogError("WorldContainerInteraction: cannot send "
+                    + command.GetType().Name + "; the container send seam is not wired.");
+                return;
+            }
+
+            if (undo != null || refused != null)
+            {
+                _pendingClientActions[command] = new PendingClientAction
+                {
+                    Undo = undo,
+                    Refused = refused,
+                };
+            }
+
+            try
+            {
+                SendOp(command);
+            }
+            catch
+            {
+                // The action never reached the host, so its merge will not run. Release the local
+                // artifact before the transport failure propagates.
+                _pendingClientActions.Remove(command);
+                throw;
+            }
+        }
+
+        private void UndoPending(ContainerIntent action)
+        {
+            if (action == null || !_pendingClientActions.TryGetValue(action, out var pending))
+            {
+                CoopPlugin.Log.LogWarning("WorldContainerInteraction: rejected "
+                    + (action == null ? "<null>" : action.GetType().Name)
+                    + " has no local prediction to reverse.");
+                return;
+            }
+
+            pending.Undo?.Invoke();
+        }
+
+        private void MergePending(ContainerIntent action, ActionResponseMessage response)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            _pendingClientActions.TryGetValue(action, out var pending);
+            _pendingClientActions.Remove(action);
+            var result = response as ContainerActionResult;
+            if (response == null || !response.Rejected)
+            {
+                // The host applied exactly this container change. The record already matches the
+                // local prediction, so only the actor-only hand-offs still need applying; the
+                // record is left untouched so a newer in-flight local edit is not regressed.
+                if (result != null)
+                {
+                    ApplyActorHandoffs(result.Container, result.Box, result.TakeIntoHand,
+                        result.ReleaseHold, result.CompletePackCollection);
+                }
+
+                return;
+            }
+
+            pending?.Refused?.Invoke();
+
+            // A refusal merges the host's post-action record after the local cleanup, so the
+            // client lands on authority instead of an inverted snapshot.
+            if (result?.Container != null)
+            {
+                ApplyContainerResult(result.Container, result.Record, result.Box,
+                    result.TakeIntoHand, result.ReleaseHold, result.CompletePackCollection);
+            }
         }
 
         // ---------------- patches ----------------
@@ -2242,9 +2338,9 @@ namespace CardShopCoop.Modules.World
                 CanWorkerTake = desiredCanTake,
                 Cards = CloneCards(desired),
             };
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () => self.ApplyContentInPlace(__instance, CloneCards(desired), desiredCanTake),
-                () => { });
+            // An absolute content set has no local artifact to reverse: the response carries the
+            // host's authoritative record, which repairs a refused edit on merge.
+            self.SendClientAction(command);
         }
 
         /// <summary>Observes the local player's donation-box content edit; the UI mutated the
@@ -2271,9 +2367,7 @@ namespace CardShopCoop.Modules.World
                 Container = __instance,
                 Cards = CloneCards(desired),
             };
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () => self.ApplyContentInPlace(__instance, CloneCards(desired)),
-                () => { });
+            self.SendClientAction(command);
         }
 
         /// <summary>Observes the local player's worker-take toggle. Vanilla <c>SetCanWorkerTake</c>
@@ -2316,9 +2410,7 @@ namespace CardShopCoop.Modules.World
                 Container = __instance,
                 CanWorkerTake = __state.Desired,
             };
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () => ApplyWorkerTake(__instance, __state.Desired),
-                () => ApplyWorkerTake(__instance, __state.Prior));
+            Current?.SendClientAction(command);
         }
 
         /// <summary>Observes the local player's cleanser toggle. Vanilla <c>OnMouseButtonUp</c>
@@ -2368,46 +2460,14 @@ namespace CardShopCoop.Modules.World
                 Container = __instance,
                 TurnedOn = desired,
             };
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () => ApplyCleanserToggle(__instance, desired),
-                () =>
-                {
-                    FiClTurnedOn?.SetValue(__instance, __state.Prior);
-                    FiClCooldown?.SetValue(__instance, __state.PriorCooldown);
-                    FiClTimer?.SetValue(__instance, __state.PriorTimer);
-                });
-        }
-
-        private static void ApplyWorkerTake(InteractableCardStorageShelf shelf, bool canWorkerTake)
-        {
-            ApplyingRemote = true;
-            try
+            // The record carries the on/refill state; the exact pre-toggle cooldown and timer are
+            // local-only, so the undo restores them before the record is merged.
+            Current?.SendClientAction(command, undo: () =>
             {
-                shelf.SetCanWorkerTake(canWorkerTake);
-                shelf.OnCardStorageShelfSettingDone();
-            }
-            finally
-            {
-                ApplyingRemote = false;
-            }
-        }
-
-        private static void ApplyCleanserToggle(InteractableAutoCleanser cleanser, bool turnedOn)
-        {
-            ApplyingRemote = true;
-            try
-            {
-                FiClTurnedOn?.SetValue(cleanser, turnedOn);
-                if (!turnedOn)
-                {
-                    FiClCooldown?.SetValue(cleanser, true);
-                    FiClTimer?.SetValue(cleanser, 0f);
-                }
-            }
-            finally
-            {
-                ApplyingRemote = false;
-            }
+                FiClTurnedOn?.SetValue(__instance, __state.Prior);
+                FiClCooldown?.SetValue(__instance, __state.PriorCooldown);
+                FiClTimer?.SetValue(__instance, __state.PriorTimer);
+            });
         }
 
         public static void HostStorageContentPostfix(InteractableCardStorageShelf __instance)
@@ -2655,9 +2715,10 @@ namespace CardShopCoop.Modules.World
                 BoxNetworkId = __state.BoxNetworkId,
                 IsPlayer = __state.IsPlayer,
             };
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () => self.ApplyEmptyBoxStored(__state.Storage, __state.BoxNetworkId),
-                () => self.ApplyEmptyBoxTaken(__state.Storage, __state.BoxNetworkId));
+            // Vanilla already consumed the box and moved the count. A refusal rematerializes the
+            // box into the hand and puts the count back before the record is merged.
+            self.SendClientAction(command,
+                undo: () => self.ApplyEmptyBoxTaken(__state.Storage, __state.BoxNetworkId));
         }
 
         internal static Exception EmptyBoxStoreFinalizer(Exception __exception,
@@ -2681,14 +2742,11 @@ namespace CardShopCoop.Modules.World
         }
 
         /// <summary>Observes a pack the local player inserted. Vanilla <c>AddItem</c> already put
-        /// the pack into the machine and moved the local queue, so only one <c>OpPackInsert</c> is
-        /// forwarded and the apply/undo closures replay the game's own insert/remove for a
-        /// rejection. An accepted insert echo reconciles in layers against this machine's own
-        /// in-flight inserts (see <see cref="ClientApplyDelta"/>) instead of applying the stale
-        /// record raw, which used to trim them and bounce the visible pack count. The guest's join
-        /// world-load restores the host save via <c>InteractableAutoPackOpener.LoadData</c>, which
-        /// calls AddItem once per stored pack (decompiled ~384). Those are not player inserts, so
-        /// the reload forwards nothing.</summary>
+        /// the pack into the machine and moved the local queue, so only one predicted action is
+        /// forwarded; a refusal removes that exact pack and returns it to the acting hand. The
+        /// guest's join world-load restores the host save via
+        /// <c>InteractableAutoPackOpener.LoadData</c>, which calls AddItem once per stored pack
+        /// (decompiled ~384). Those are not player inserts, so the reload forwards nothing.</summary>
         public static void PackOpenerAddItemPostfix(InteractableAutoPackOpener __instance, Item item)
         {
             if (ApplyingRemote || __instance == null || item == null || Reloading)
@@ -2712,71 +2770,26 @@ namespace CardShopCoop.Modules.World
                 // a different order here would insert the WRONG product on the host
                 ItemType = item.GetItemType(),
             };
-            // One prediction key per machine: an insert echo's layered reconcile must undo/replay
-            // only this opener's own in-flight inserts, never another container's pending action.
-            var actionId = Guid.Empty;
-            actionId = WorldAction.Submit(PackInsertPredictionKey(idx), command,
-                () =>
+            // Vanilla already inserted the pack and moved the local queue. One action instance owns
+            // exactly this item, so a refusal removes precisely that insert and returns the pack to
+            // the acting hand - never another machine's or another insert's pack.
+            self.SendClientAction(command, undo: () =>
+            {
+                ApplyingRemote = true;
+                try
                 {
-                    ApplyingRemote = true;
-                    try
-                    {
-                        if (!__instance.GetStoredItemList().Contains(item))
-                        {
-                            // A reconcile may have pooled the item while its prediction was in
-                            // flight (a remote record trimmed the tail); bring it back visible
-                            // before the game is handed it again.
-                            item.gameObject.SetActive(true);
-                            __instance.AddItem(item, addToFront: true, isPlayer: false);
-                        }
-                    }
-                    finally
-                    {
-                        ApplyingRemote = false;
-                    }
-                },
-                () =>
-                {
-                    // A follower is undone only for the duration of the reconcile and is replayed
-                    // right after, so it is removed here. The retired target is left in place:
-                    // either the authoritative record being applied already carries it, or a
-                    // terminal rejection's callback hands it back.
-                    if (!ActionLedger.IsPending(actionId)
-                        || !__instance.GetStoredItemList().Contains(item))
-                    {
-                        return;
-                    }
-
-                    ApplyingRemote = true;
-                    try
+                    if (__instance.GetStoredItemList().Contains(item))
                     {
                         __instance.RemoveItem(item);
                     }
-                    finally
-                    {
-                        ApplyingRemote = false;
-                    }
-                },
-                () =>
+                }
+                finally
                 {
-                    // Terminal rejection: the target undo above deliberately left the pack in the
-                    // machine, so take it out here and put it back in the acting hand.
-                    self._pendingPackInserts.Remove(actionId);
-                    ApplyingRemote = true;
-                    try
-                    {
-                        if (__instance.GetStoredItemList().Contains(item))
-                        {
-                            __instance.RemoveItem(item);
-                        }
-                    }
-                    finally
-                    {
-                        ApplyingRemote = false;
-                    }
-                    RestoreHeldPack(item);
-                });
-            self._pendingPackInserts.Add(actionId);
+                    ApplyingRemote = false;
+                }
+
+                RestoreHeldPack(item);
+            });
         }
 
         /// <summary>Observes the local player's cleanser refill. The game's own <c>AddItem</c> has
@@ -2806,45 +2819,26 @@ namespace CardShopCoop.Modules.World
                 Container = __instance,
                 Fill = item.GetContentFill(),
             };
-            WorldAction.Submit(WorldAction.ContainersScope, command,
-                () =>
+            // Vanilla already inserted the can. A refusal removes exactly that can before the
+            // authoritative record is merged.
+            self.SendClientAction(command, undo: () =>
+            {
+                ApplyingRemote = true;
+                try
                 {
-                    ApplyingRemote = true;
-                    try
+                    if (__instance.GetStoredItemList().Contains(item))
                     {
-                        if (!__instance.GetStoredItemList().Contains(item))
-                        {
-                            __instance.AddItem(item, true);
-                        }
+                        __instance.RemoveItem(item);
                     }
-                    finally
-                    {
-                        ApplyingRemote = false;
-                    }
-                },
-                () =>
+                }
+                finally
                 {
-                    ApplyingRemote = true;
-                    try
-                    {
-                        if (__instance.GetStoredItemList().Contains(item))
-                        {
-                            __instance.RemoveItem(item);
-                        }
-                    }
-                    finally
-                    {
-                        ApplyingRemote = false;
-                    }
-                });
+                    ApplyingRemote = false;
+                }
+            });
         }
 
         // ---------------- shared helpers ----------------
-
-        /// <summary>One prediction key per pack opener, so an insert echo's layered reconcile only
-        /// undoes/replays that machine's own in-flight inserts.</summary>
-        private static string PackInsertPredictionKey(int idx)
-            => WorldAction.ContainersScope + ":pack:" + idx;
 
         /// <summary>Puts a pack that a rejected insert removed from the local hand back where it
         /// was. Vanilla's EvaluatePutItemOnShelf removes the pack from the hold list right after
@@ -2978,5 +2972,21 @@ namespace CardShopCoop.Modules.World
                 CoopPlugin.Log.LogWarning($"Patch failed for {type.Name}.{method}: {e.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// Host -> the acting client: the post-action state of one container action, returned on
+    /// accept and on reject. The record is authoritative; the hand flags describe only the acting
+    /// player's own hands, so they never travel on the broadcast to the other peers.
+    /// </summary>
+    [NetworkMessage]
+    public sealed class ContainerActionResult : ActionResponseMessage
+    {
+        public InteractableObject Container;
+        public ContainerRecord Record;
+        public InteractablePackagingBox Box;
+        public bool TakeIntoHand;
+        public bool ReleaseHold;
+        public bool CompletePackCollection;
     }
 }

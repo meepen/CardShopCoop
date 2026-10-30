@@ -16,10 +16,9 @@ namespace CardShopCoop.Modules.Bills
     public sealed class BillsHostBehaviour : CoopBehaviour
     {
         private static BillsHostBehaviour _active;
-        private readonly HashSet<int> _fullyJoined = new();
         private bool _shutdown;
         private bool _initialized;
-        private int _forwardedRequester;
+        private ICoopPeer _forwardedRequester;
         private bool _applyingIntent;
 
         private void OnEnable()
@@ -57,33 +56,24 @@ namespace CardShopCoop.Modules.Bills
         [OnFullyJoined]
         private void SendInitialState(PeerConnection connection)
         {
-            if (connection == null)
+            var peer = PeerHandle.ForConnection(connection);
+            if (peer == null)
             {
                 return;
             }
 
-            _fullyJoined.Add(connection.Id);
-            SendState(connection.Id);
-        }
-
-        [OnClientDisconnected]
-        private void ForgetPeer(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection != null)
-            {
-                _fullyJoined.Remove(connection.Id);
-            }
+            SendState(peer);
         }
 
         [MessageHandler]
-        private ActionOutcome HandlePayment(MessageContext context, BillPaymentMessage message)
+        private ActionOutcome HandlePayment(CoopMessageContext context, BillPaymentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
             {
                 return ActionOutcome.Reject("bills payment sender is not an admitted peer");
             }
 
-            var peer = context.Connection.Id;
+            var peer = context.Peer;
             try
             {
                 if (message.BillType != 0
@@ -109,7 +99,7 @@ namespace CardShopCoop.Modules.Bills
                     }
                     finally
                     {
-                        _forwardedRequester = 0;
+                        _forwardedRequester = null;
                     }
 
                     return RejectPayment(context, message, "host wallet could not cover the payment");
@@ -142,7 +132,7 @@ namespace CardShopCoop.Modules.Bills
                 finally
                 {
                     _applyingIntent = false;
-                    _forwardedRequester = 0;
+                    _forwardedRequester = null;
                 }
 
                 if (!accepted)
@@ -150,25 +140,31 @@ namespace CardShopCoop.Modules.Bills
                     return RejectPayment(context, message, "the host refused the payment");
                 }
 
-                BroadcastDelta(BuildDelta(message.BillType, message.ActionId));
-                return ActionOutcome.Applied();
+                var state = BuildDelta(message.BillType);
+                if (peer != null)
+                {
+                    Context.BroadcastExcept(peer, state);
+                }
+
+                return ActionOutcome.Applied(new BillPaymentResponse { State = state });
             }
             catch (Exception exception)
             {
-                _forwardedRequester = 0;
-                CoopPlugin.Log.LogError("Bills payment failed for peer " + peer + ": " + exception);
+                _forwardedRequester = null;
+                CoopPlugin.Log.LogError("Bills payment failed for peer "
+                    + (peer == null ? "?" : peer.Name) + ": " + exception);
                 return RejectPayment(context, message, "bills payment failed");
             }
         }
 
-        private void SendState(int peer)
+        private void SendState(ICoopPeer peer)
         {
-            if (_shutdown || !RuntimeContext.InGame())
+            if (_shutdown || !RuntimeContext.InGame() || peer == null)
             {
                 return;
             }
 
-            RuntimeContext.Send(peer, BuildState());
+            peer.Send(BuildState());
         }
 
         private void BroadcastDelta(BillsDeltaMessage message)
@@ -178,7 +174,7 @@ namespace CardShopCoop.Modules.Bills
                 return;
             }
 
-            RuntimeContext.Broadcast(message);
+            Context.Broadcast(message);
         }
 
         private static BillsStateMessage BuildState()
@@ -206,11 +202,10 @@ namespace CardShopCoop.Modules.Bills
             };
         }
 
-        private static BillsDeltaMessage BuildDelta(byte billType, Guid actionId)
+        private static BillsDeltaMessage BuildDelta(byte billType)
         {
             var message = new BillsDeltaMessage
             {
-                ActionId = actionId,
                 BillType = billType,
                 All = billType == 0,
             };
@@ -235,44 +230,44 @@ namespace CardShopCoop.Modules.Bills
                 AmountToPay = bill == null ? 0f : bill.amountToPay,
             };
 
-        /// <summary>Answers a rejected payment with the authoritative bills under the rejected
-        /// prediction id. Those values settle the requester's prediction, so the handler reports
-        /// the command as already applied instead of asking the framework for a second generic
-        /// rollback. When no authority can be sent (the host is leaving the game), the caller gets
-        /// a plain rejection so the framework still reverses the guest's optimistic payment.</summary>
-        private static ActionOutcome RejectPayment(MessageContext context,
+        /// <summary>Answers a rejected payment with the host's absolute bills. The response
+        /// settles the requester's prediction (undo then merge), so the refusal never needs a
+        /// second generic rollback. When the host cannot read its bills (leaving the game), the
+        /// rejection carries no state and the guest's optimistic payment is simply reversed.</summary>
+        private static ActionOutcome RejectPayment(CoopMessageContext context,
             BillPaymentMessage message, string reason)
         {
             var active = _active;
-            if (active == null || context?.Connection == null || message == null)
+            if (active == null || context?.Peer == null || message == null
+                || !active.TryBuildRejectionState(message, out var refresh))
             {
                 return ActionOutcome.Reject(reason);
             }
 
-            return active.SendRejectionState(context.Connection.Id, message)
-                ? ActionOutcome.Applied()
-                : ActionOutcome.Reject(reason);
+            return ActionOutcome.Reject(reason, new BillPaymentResponse { State = refresh });
         }
 
-        private bool SendRejectionState(int peer, BillPaymentMessage message)
+        private bool TryBuildRejectionState(BillPaymentMessage message,
+            out BillsDeltaMessage refresh)
         {
+            refresh = null;
             if (_shutdown || !RuntimeContext.InGame())
             {
                 return false;
             }
 
-            var refresh = BuildDelta(0, message.ActionId);
-            CoopPlugin.Log.LogInfo("[bills] rejection refresh to conn " + peer
+            refresh = BuildDelta(0);
+            CoopPlugin.Log.LogInfo("[bills] rejection state to "
+                + (message.Peer == null ? "?" : message.Peer.Name)
                 + " rent=" + refresh.Rent.AmountToPay + " electric=" + refresh.Electric.AmountToPay
                 + " employee=" + refresh.Employee.AmountToPay
                 + " pred=" + message.ActionId + ".");
-            RuntimeContext.Send(peer, refresh);
             return true;
         }
 
-        private bool IsPeerMessage(MessageContext context)
-            => !_shutdown && context?.Connection != null
-                && _fullyJoined.Contains(context.Connection.Id);
+        private bool IsPeerMessage(CoopMessageContext context)
+            => !_shutdown && context?.Peer != null && context.IsAuthenticated
+                && context.Peer.State == ConnectionState.FullyJoined;
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
@@ -293,7 +288,7 @@ namespace CardShopCoop.Modules.Bills
                 _active = null;
             }
 
-            _fullyJoined.Clear();
+            _forwardedRequester = null;
             BillsInterop.Reset();
         }
 
@@ -310,7 +305,7 @@ namespace CardShopCoop.Modules.Bills
                     return;
                 }
 
-                _active.BroadcastDelta(BuildDelta((byte)billType, Guid.Empty));
+                _active.BroadcastDelta(BuildDelta((byte)billType));
             }
         }
 
@@ -325,7 +320,7 @@ namespace CardShopCoop.Modules.Bills
                     return;
                 }
 
-                _active.BroadcastDelta(BuildDelta((byte)billType, Guid.Empty));
+                _active.BroadcastDelta(BuildDelta((byte)billType));
             }
         }
 
@@ -339,13 +334,12 @@ namespace CardShopCoop.Modules.Bills
             private static void Postfix(ENotEnoughResourceText __0)
             {
                 var host = _active;
-                if (host == null || host._forwardedRequester <= 0)
+                if (host == null || host._forwardedRequester == null)
                 {
                     return;
                 }
 
-                host.RuntimeContext.Send(host._forwardedRequester,
-                    new BillPopupMessage { Text = (int)__0 });
+                host._forwardedRequester.Send(new BillPopupMessage { Text = (int)__0 });
             }
         }
     }

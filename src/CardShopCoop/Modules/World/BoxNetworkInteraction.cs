@@ -3,8 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using CardShopCoop.Api;
 using CardShopCoop.Modules.GameObjectIdentity;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using UnityEngine;
@@ -92,11 +92,12 @@ namespace CardShopCoop.Modules.World
         private readonly Queue<Guid> _pendingClientDeliveryIds = new();
         private Guid _pendingClientCreatedId;
         private readonly HashSet<Guid> _clientOwnedIds = new();
-        // Client: a locally predicted throw or placement still awaiting its host decision, keyed by
-        // box id. A host message that crossed the move on the wire - a granted hold or a box-state
-        // refresh - describes the box's earlier state, so it must not re-grab the box or drag it
-        // back to an old pose.
-        private readonly Dictionary<Guid, Guid> _pendingLocalMoves = new();
+        // Client: the locally predicted throw or placement still awaiting its host decision, keyed
+        // by box id. A host message that crossed the move on the wire - a granted hold or a
+        // box-state refresh - describes the box's earlier state, so it must not re-grab the box or
+        // drag it back to an old pose. The action itself clears its entry from OnMerge, so the
+        // bookkeeping lives exactly as long as the prediction does.
+        private readonly Dictionary<Guid, ActionMessage> _pendingLocalMoves = new();
         private int _deliverySpawns;
         // Set while a container operation consumes a box through the game's own store path (for
         // example InteractableEmptyBoxStorage.StoreBox). The container op already carries the box
@@ -116,7 +117,7 @@ namespace CardShopCoop.Modules.World
             AccessTools.Field(typeof(InteractableObject), "m_IsBeingHold");
 
         internal BoxNetworkInteraction(bool host, Action<INetMessage> broadcast,
-            Action<int, INetMessage> send)
+            Action<ICoopPeer, INetMessage> send)
         {
             _host = host;
             _broadcast = broadcast ?? throw new ArgumentNullException(nameof(broadcast));
@@ -842,6 +843,27 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Client: applies the absolute contents/open state a box-state action's response
+        /// carries. The post-action state is idempotent, so a refused change converges on the host
+        /// instead of inverting a local snapshot.</summary>
+        internal bool ClientApplyItemState(InteractablePackagingBox box, EItemType itemType,
+            int itemCount, bool isBoxOpened)
+        {
+            if (_host || box is not InteractablePackagingBox_Item item)
+            {
+                return false;
+            }
+
+            ApplyItemState(item, new BoxNetworkState
+            {
+                Kind = BoxNetworkKind.Item,
+                ItemType = itemType,
+                ItemCount = itemCount,
+                IsBoxOpened = isBoxOpened,
+            });
+            return true;
+        }
+
         internal BoxNetworkState DescribeAuthoritative(Guid id)
         {
             // Furniture state is a placement descriptor/delta, never box content.
@@ -877,30 +899,36 @@ namespace CardShopCoop.Modules.World
         /// that arrives until the prediction resolves crossed that move on the wire and must not
         /// override it - re-holding pulled the just-thrown box back into the hand (the first throw
         /// after a take or box-up looked refused) and re-posing teleported it.</summary>
-        internal void NotePendingLocalMove(Guid boxNetworkId, Guid actionId)
+        internal void NotePendingLocalMove(Guid boxNetworkId, ActionMessage action)
         {
-            if (boxNetworkId != Guid.Empty && actionId != Guid.Empty)
+            if (boxNetworkId != Guid.Empty && action != null)
             {
-                _pendingLocalMoves[boxNetworkId] = actionId;
+                _pendingLocalMoves[boxNetworkId] = action;
             }
         }
 
         /// <summary>True while a locally predicted throw/placement for this box has not yet been
-        /// resolved by the host. Resolved entries are pruned here.</summary>
+        /// resolved by the host. The owning action clears its own entry from OnMerge.</summary>
         internal bool HasPendingLocalMove(Guid boxNetworkId)
+            => boxNetworkId != Guid.Empty && _pendingLocalMoves.ContainsKey(boxNetworkId);
+
+        /// <summary>True while <paramref name="action"/> itself owns this box's in-flight
+        /// move.</summary>
+        internal bool IsPendingLocalMove(Guid boxNetworkId, ActionMessage action)
+            => boxNetworkId != Guid.Empty
+                && _pendingLocalMoves.TryGetValue(boxNetworkId, out var current)
+                && ReferenceEquals(current, action);
+
+        /// <summary>The action settled: forget its move unless a newer prediction for the same box
+        /// replaced it. A newer move owns the box now, so the settling action must not clear it.</summary>
+        internal void ForgetPendingLocalMove(Guid boxNetworkId, ActionMessage action)
         {
-            if (!_pendingLocalMoves.TryGetValue(boxNetworkId, out var actionId))
+            if (boxNetworkId != Guid.Empty
+                && _pendingLocalMoves.TryGetValue(boxNetworkId, out var current)
+                && ReferenceEquals(current, action))
             {
-                return false;
+                _pendingLocalMoves.Remove(boxNetworkId);
             }
-
-            if (ActionLedger.IsPending(actionId))
-            {
-                return true;
-            }
-
-            _pendingLocalMoves.Remove(boxNetworkId);
-            return false;
         }
 
         /// <summary>Reads the game's own stored flag rather than a shadow copy. A box is stored

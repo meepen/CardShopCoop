@@ -61,48 +61,6 @@ namespace CardShopCoop.Modules.World
             return compartment != null;
         }
 
-        // Compatibility bridge for the Pricing module, whose own wire intent still carries a
-        // placement key. World card-display messages do not use these; they carry the live shelf.
-        internal static bool TryMakeKey(InteractableCardCompartment compartment, out int shelfKey,
-            out int compartmentIndex)
-        {
-            shelfKey = 0;
-            compartmentIndex = -1;
-            if (compartment == null)
-            {
-                return false;
-            }
-
-            var shelf = compartment.GetCardShelf();
-            if (shelf == null)
-            {
-                return false;
-            }
-
-            var kind = PlacementInterop.FindKind(shelf);
-            if (kind < 0 || !PlacementApi.TryMakeObjectKey(kind, shelf, out shelfKey))
-            {
-                return false;
-            }
-
-            var compartments = shelf.GetCardCompartmentList();
-            if (compartments == null)
-            {
-                return false;
-            }
-
-            compartmentIndex = compartments.IndexOf(compartment);
-            return compartmentIndex >= 0 && compartmentIndex < MaxCompartments;
-        }
-
-        internal static bool TryResolve(int shelfKey, int compartmentIndex,
-            out InteractableCardCompartment compartment)
-        {
-            compartment = null;
-            return PlacementApi.ResolveObjectByKey(shelfKey) is CardShelf shelf
-                && TryGetCompartment(shelf, compartmentIndex, out compartment);
-        }
-
         /// <summary>The card currently displayed in a slot, or null when the slot is empty or its
         /// card UI has not been built yet.</summary>
         internal static CardData Read(InteractableCardCompartment compartment)
@@ -117,10 +75,10 @@ namespace CardShopCoop.Modules.World
             return stored[0].m_Card3dUI.m_CardUI.GetCardData();
         }
 
-        /// <summary>Content+grade equality against the slot that is ALREADY addressed by its
-        /// stable (shelfKey, compartment). This is only an idempotency/verification check for a
-        /// slot the caller resolved by key - never a search that identifies the slot itself.
-        /// The placed card's content is a legitimate fungible key; the slot identity is the key.</summary>
+        /// <summary>Content+grade equality against the slot that is ALREADY addressed by its live
+        /// shelf and compartment index. This is only an idempotency/verification check for that
+        /// slot - never a search that identifies the slot itself. The placed card's content is a
+        /// legitimate fungible identity; the slot is named by the caller's live shelf reference.</summary>
         internal static bool Matches(InteractableCardCompartment compartment, CardData card,
             int encodedGrade)
         {
@@ -374,31 +332,6 @@ namespace CardShopCoop.Modules.World
             }
 
             compartment.SetCardOnShelf(card3d);
-            return true;
-        }
-
-        /// <summary>Replays a removal by moving a stored card into the hand exactly like vanilla
-        /// <c>OnRightMouseButtonUp</c> does.</summary>
-        internal static bool TakeCardIntoHand(InteractableCardCompartment compartment,
-            InteractableCard3d card3d)
-        {
-            if (compartment == null || card3d == null || !card3d
-                || compartment.m_StoredCardList == null
-                || !compartment.m_StoredCardList.Contains(card3d)
-                || !InteractionPlayerController.HasEnoughSlotToHoldCard())
-            {
-                return false;
-            }
-
-            var controller = SceneRef<InteractionPlayerController>.Get();
-            if (controller == null)
-            {
-                return false;
-            }
-
-            InteractionPlayerController.AddHoldCard(card3d);
-            controller.EnterHoldCardMode();
-            compartment.RemoveCardFromShelf(null, null);
             return true;
         }
     }

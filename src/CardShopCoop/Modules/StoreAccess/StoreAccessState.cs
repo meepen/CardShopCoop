@@ -10,8 +10,7 @@ namespace CardShopCoop.Modules.StoreAccess
     ///
     /// Host-only: a client writes through <see cref="StoreAccessToggleIntent"/>, so the validated
     /// intent lane is the only way to change it. <see cref="ActionId"/> and <see cref="Rejected"/>
-    /// let the client handler correlate the host's echo/rejection with the optimistic toggle it
-    /// recorded in <see cref="Actions.ActionLedger"/>.
+    /// let the client's extended-information handler settle the optimistic toggle it predicted.
     /// </summary>
     [GlobalInformation]
     [HostOnlyInformation]

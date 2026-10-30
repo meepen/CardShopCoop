@@ -11,7 +11,7 @@ namespace CardShopCoop.Net
     /// <summary>Frame builders/parsers. Wire format per frame:
     /// [int32 frameLen][byte tokenKind][token][UTF-8 JSON payload]. A named token is
     /// [int32 nameLen][UTF-8 Type.FullName]; a compact token is [uint16 messageId].</summary>
-    public static class Msg
+    internal static class Msg
     {
         public const int FrameHeaderSize = 4;
         public const int TokenKindSize = 1;

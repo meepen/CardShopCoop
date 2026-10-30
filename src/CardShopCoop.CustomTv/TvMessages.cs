@@ -41,7 +41,8 @@ namespace CardShopCoop.CustomTv
         }
     }
 
-    /// <summary>Shared client intent for one TV. <see cref="Tv"/> is also the action ledger key.</summary>
+    /// <summary>Shared client intent for one TV. Each control is an independent action; a second
+    /// control on the same TV is allowed while this one is still awaiting the host.</summary>
     public abstract class TvActionMessage : ActionMessage
     {
         public InteractableObject Tv;
@@ -68,25 +69,14 @@ namespace CardShopCoop.CustomTv
             || Operation == TvOperation.Next
             || Operation == TvOperation.Previous;
 
-        public override void OnApply()
-        {
-            try
-            {
-                Apply();
-            }
-            catch (InvalidOperationException)
-            {
-                var controller = TvInterop.ControllerFor(Tv);
-                if (!TvInterop.Present || controller == null
-                    || TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>() == null)
-                {
-                    throw;
-                }
+        /// <summary>Applies this control through the game's own playback path. The host calls it
+        /// from its message handler; the client ran the same game path as its prediction before
+        /// sending.</summary>
+        internal abstract void Apply();
 
-                Rejected = true;
-            }
-        }
-
+        /// <summary>Reverses only the local prediction when the host rejects the control. The
+        /// authoritative playback state is a <see cref="TvState"/> value that the extended-
+        /// information handler applies after this call.</summary>
         public override void OnUndo(ActionResponseMessage response)
         {
             // TV state is authoritative and travels as TvState extended information, so the
@@ -101,7 +91,14 @@ namespace CardShopCoop.CustomTv
             TvInterop.UndoOp(Tv, Previous);
         }
 
-        protected abstract void Apply();
+        /// <summary>Settles the control. The resulting playback state arrives as a
+        /// <see cref="TvState"/> extended-information value and is applied before this call, so
+        /// there is no response payload to merge; only the local undo snapshot remains to clear.</summary>
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            Previous = default;
+            UndoSeek = double.NaN;
+        }
     }
 
     [NetworkMessage]
@@ -109,7 +106,7 @@ namespace CardShopCoop.CustomTv
     {
         internal override TvOperation Operation => TvOperation.Next;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Next, null, null, 0);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Next, null, null, 0);
     }
 
     [NetworkMessage]
@@ -117,7 +114,7 @@ namespace CardShopCoop.CustomTv
     {
         internal override TvOperation Operation => TvOperation.Previous;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Previous, null, null, 0);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Previous, null, null, 0);
     }
 
     [NetworkMessage]
@@ -128,7 +125,7 @@ namespace CardShopCoop.CustomTv
 
         internal override TvOperation Operation => TvOperation.Open;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Open, Url, Title, 0);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Open, Url, Title, 0);
     }
 
     [NetworkMessage]
@@ -136,7 +133,7 @@ namespace CardShopCoop.CustomTv
     {
         internal override TvOperation Operation => TvOperation.Pause;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Pause, null, null, 0);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Pause, null, null, 0);
     }
 
     [NetworkMessage]
@@ -144,7 +141,7 @@ namespace CardShopCoop.CustomTv
     {
         internal override TvOperation Operation => TvOperation.Power;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Power, null, null, 0);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Power, null, null, 0);
     }
 
     [NetworkMessage]
@@ -152,7 +149,7 @@ namespace CardShopCoop.CustomTv
     {
         internal override TvOperation Operation => TvOperation.Shuffle;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Shuffle, null, null, 0);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Shuffle, null, null, 0);
     }
 
     [NetworkMessage]
@@ -162,6 +159,6 @@ namespace CardShopCoop.CustomTv
 
         internal override TvOperation Operation => TvOperation.Seek;
 
-        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Seek, null, null, Delta);
+        internal override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Seek, null, null, Delta);
     }
 }

@@ -1,165 +1,201 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
+using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Modules.Presence;
-using CardShopCoop.Api;
 
 namespace CardShopCoop.Runtime
 {
+    /// <summary>
+    /// The live session context. Built-in modules use the rich members while the public
+    /// <see cref="ICoopContext"/> view exposes only peer handles and sends, so a module never
+    /// handles connection ids or transport connections.
+    /// </summary>
     public sealed class CoopRuntimeContext : ICoopContext
     {
         public MessageRouter Messages
         {
             get;
         }
+
+        /// <summary>True once the local peer has finished joining and gameplay traffic is allowed.</summary>
         public Func<bool> InGame
         {
             get;
         }
-        public Action<INetMessage> Broadcast
+
+        /// <summary>The current display name for a host-canonical player id. Internal because a
+        /// module talks to players through <see cref="ICoopPeer"/>.</summary>
+        internal Func<int, string> PeerName
         {
             get;
         }
-        public Action<int, INetMessage> Send
+
+        /// <summary>The live transport connections, used only to build peer handles. Internal
+        /// because a module never addresses a connection directly.</summary>
+        internal Func<IReadOnlyList<PeerConnection>> Connections
         {
             get;
         }
-        /// <summary>Fans a host message out to every ready peer except one, using the same
-        /// admission as a broadcast. Null on contexts that predate a live transport.</summary>
-        public Action<int, INetMessage> Relay
-        {
-            get;
-        }
-        /// <summary>The live reachable peers, shared with the public context view. Null on
-        /// contexts that predate a live transport.</summary>
-        public Func<IReadOnlyList<PeerConnection>> Connections
-        {
-            get;
-        }
-        public Func<IReadOnlyList<int>> ConnectionIds
-        {
-            get;
-        }
-        public Func<int, string> PeerName
-        {
-            get;
-        }
+
         public Action<string, float> SetStatusLine
         {
             get;
         }
+
         public Func<bool> PreloadHold
         {
             get;
         }
-        public Action<int, DisconnectInfo> Disconnect
-        {
-            get;
-        }
-        public IPeerPresence PeerPresence
+
+        internal Action<int, DisconnectInfo> Disconnect
         {
             get;
         }
 
-        public CoopRuntimeContext(MessageRouter messages, Func<bool> inGame,
-            Action<INetMessage> broadcast, Action<int, INetMessage> send,
-            Func<IReadOnlyList<int>> connectionIds = null,
-            Func<int, string> peerName = null,
+        internal IPeerPresence PeerPresence
+        {
+            get;
+        }
+
+        internal CoopRuntimeContext(MessageRouter messages, Func<bool> inGame,
             Action<string, float> setStatusLine = null,
             Func<bool> preloadHold = null,
             Action<int, DisconnectInfo> disconnect = null,
-            Action<int, INetMessage> relay = null,
+            Func<int, string> peerName = null,
             Func<IReadOnlyList<PeerConnection>> connections = null)
         {
             Messages = messages ?? throw new ArgumentNullException(nameof(messages));
             InGame = inGame ?? throw new ArgumentNullException(nameof(inGame));
-            Broadcast = broadcast ?? throw new ArgumentNullException(nameof(broadcast));
-            Send = send ?? throw new ArgumentNullException(nameof(send));
-            Connections = connections;
-            ConnectionIds = connectionIds;
-            PeerName = peerName;
             SetStatusLine = setStatusLine;
             PreloadHold = preloadHold;
             Disconnect = disconnect;
-            Relay = relay;
+            PeerName = peerName;
+            Connections = connections;
             PeerPresence = new PeerPresenceProvider(TimeSpan.FromSeconds(10));
         }
 
-        // ICoopContext is the public view of this live session. Explicit implementations keep the
-        // built-in rich members (Func/Action fields, MessageRouter) untouched for internal modules.
         bool ICoopContext.IsHost => CoopCore.Role == CoopRole.Host;
+
         bool ICoopContext.IsClient => CoopCore.Role == CoopRole.Client;
+
         bool ICoopContext.InSession => CoopCore.Role != CoopRole.None;
+
         bool ICoopContext.InGame => InGame != null && InGame();
-        int ICoopContext.LocalConnectionId => CoopCore.LocalConnectionId;
-        int ICoopContext.HostConnectionId => CoopCore.Role == CoopRole.Client ? 1 : -1;
-        PeerConnection ICoopContext.HostConnection => CoopCore.Role == CoopRole.Client
-            ? FindConnection(1) : null;
-        IReadOnlyList<PeerConnection> ICoopContext.Connections => Connections == null
-            ? Array.Empty<PeerConnection>() : Connections();
-        IReadOnlyList<PlayerRef> ICoopContext.Players => BuildPlayers();
-        PlayerRef ICoopContext.Self => FindPlayer(player => player.IsSelf);
-        PlayerRef ICoopContext.Host => FindPlayer(player => player.IsHost);
-        IReadOnlyList<int> ICoopContext.ConnectionIds => ConnectionIds == null
-            ? Array.Empty<int>() : ConnectionIds();
-        string ICoopContext.PeerName(int connectionId)
-            => PeerName == null ? null : PeerName(connectionId);
-        void ICoopContext.Send(PeerConnection connection, INetMessage message)
-        {
-            if (connection == null)
-            {
-                throw new ArgumentNullException(nameof(connection));
-            }
 
-            Send(connection.Id, message);
-        }
-        void ICoopContext.Send(int connectionId, INetMessage message) => Send(connectionId, message);
-        void ICoopContext.Broadcast(INetMessage message) => Broadcast(message);
+        /// <summary>This machine's player handle.</summary>
+        public ICoopPeer Self => PeerHandle.Self();
 
-        private PeerConnection FindConnection(int connectionId)
+        /// <summary>The host's player handle: this player on the host, the connected host on a
+        /// client.</summary>
+        public ICoopPeer Host => PeerHandle.Host();
+
+        /// <summary>Every reachable peer except this player, as handles.</summary>
+        public IReadOnlyList<ICoopPeer> Peers
         {
-            var connections = Connections?.Invoke();
-            if (connections != null)
+            get
             {
+                var connections = Connections?.Invoke();
+                if (connections == null || connections.Count == 0)
+                {
+                    return Array.Empty<ICoopPeer>();
+                }
+
+                if (CoopCore.Role == CoopRole.Client)
+                {
+                    for (var i = 0; i < connections.Count; i++)
+                    {
+                        var connection = connections[i];
+                        if (connection != null && connection.Id == 1)
+                        {
+                            return new ICoopPeer[] { PeerHandle.ForConnection(connection) };
+                        }
+                    }
+
+                    return Array.Empty<ICoopPeer>();
+                }
+
+                var peers = new List<ICoopPeer>(connections.Count);
                 for (var i = 0; i < connections.Count; i++)
                 {
-                    if (connections[i] != null && connections[i].Id == connectionId)
+                    var peer = PeerHandle.ForConnection(connections[i]);
+                    if (peer != null)
                     {
-                        return connections[i];
+                        peers.Add(peer);
                     }
                 }
-            }
 
-            return null;
+                return peers;
+            }
         }
 
-        private static IReadOnlyList<PlayerRef> BuildPlayers()
+        /// <summary>Every player in the session, host first, including this player.</summary>
+        IReadOnlyList<PlayerRef> ICoopContext.Players
         {
-            var players = PresenceApi.SessionPlayers;
-            var result = new List<PlayerRef>(players.Count);
-            for (var i = 0; i < players.Count; i++)
+            get
             {
-                var player = players[i];
-                result.Add(new PlayerRef(player.IsHost ? 0 : player.Id, player.Name,
-                    player.IsHost, player.IsSelf));
-            }
-
-            return result;
-        }
-
-        private static PlayerRef FindPlayer(Func<PlayerRef, bool> match)
-        {
-            var players = BuildPlayers();
-            for (var i = 0; i < players.Count; i++)
-            {
-                if (match(players[i]))
+                var players = PresenceApi.SessionPlayers;
+                if (players == null || players.Count == 0)
                 {
-                    return players[i];
+                    return Array.Empty<PlayerRef>();
                 }
+
+                var result = new List<PlayerRef>(players.Count);
+                for (var i = 0; i < players.Count; i++)
+                {
+                    var player = players[i];
+                    result.Add(new PlayerRef(player.IsHost ? 0 : player.Id, player.Name,
+                        player.IsHost, player.IsSelf));
+                }
+
+                return result;
+            }
+        }
+
+        /// <summary>A client sends to the host. The host fans out with
+        /// <see cref="Broadcast"/>.</summary>
+        public void Send(INetMessage message)
+        {
+            if (CoopCore.Role != CoopRole.Client)
+            {
+                throw new InvalidOperationException(
+                    "Only a client sends to the host; the host uses Broadcast/BroadcastExcept.");
             }
 
-            return null;
+            var core = CoopCore.Instance ?? throw new InvalidOperationException(
+                "Cannot send because the co-op core is not running.");
+            core.SendMessage(PeerHandle.Host(), message);
+        }
+
+        /// <summary>From the host, fans out to every ready peer; from a client, sends to the host.</summary>
+        public void Broadcast(INetMessage message)
+        {
+            var core = CoopCore.Instance ?? throw new InvalidOperationException(
+                "Cannot broadcast because the co-op core is not running.");
+            core.BroadcastMessage(message);
+        }
+
+        /// <summary>From the host, fans out to every ready peer except <paramref name="peer"/>.
+        /// Uses the transport's relay admission, never a raw connection loop.</summary>
+        public void BroadcastExcept(ICoopPeer peer, INetMessage message)
+        {
+            if (peer == null)
+            {
+                throw new ArgumentNullException(nameof(peer));
+            }
+
+            if (CoopCore.Role == CoopRole.Client)
+            {
+                // A client has exactly one recipient, so the exclusion does not change the
+                // destination: the message goes to the host.
+                Send(message);
+                return;
+            }
+
+            var core = CoopCore.Instance ?? throw new InvalidOperationException(
+                "Cannot broadcast because the co-op core is not running.");
+            core.BroadcastExceptMessage(peer, message);
         }
     }
 }

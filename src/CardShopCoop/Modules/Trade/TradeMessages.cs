@@ -59,15 +59,25 @@ namespace CardShopCoop.Modules.Trade
         /// <summary>Coins the actor spent for a coin purchase; 0 for a card-for-card trade.</summary>
         public float CoinSpent;
 
-        // The client registers this prediction through the explicit Apply/Undo closures in
-        // TradeClientBehaviour, and the host handler performs the trade operation itself, so the
-        // action hooks are never the applied path.
-        public override void OnApply()
-        {
-        }
+        /// <summary>The local action state this intent predicted. Local-only; never serialized.</summary>
+        [NonSerialized]
+        internal TradeClientBehaviour Client;
+
+        [NonSerialized]
+        internal TradeClientBehaviour.PredictionFrame Frame;
 
         public override void OnUndo(ActionResponseMessage response)
         {
+            Client?.UndoPrediction(Frame);
+        }
+
+        public override void OnMerge(ActionResponseMessage response)
+        {
+            var client = Client;
+            var frame = Frame;
+            Client = null;
+            Frame = null;
+            client?.MergePrediction(frame, response);
         }
     }
 
@@ -80,10 +90,8 @@ namespace CardShopCoop.Modules.Trade
 
     /// <summary>Accepted claim for a predicted guest trade session.</summary>
     [NetworkMessage]
-    public sealed class TradeSessionMessage : INetMessage
+    public sealed class TradeSessionResponse : ActionResponseMessage
     {
-        /// <summary>The prediction this claim answers, or empty for a host-local session.</summary>
-        public Guid ActionId;
         public InteractableCashierCounter Counter;
         public Customer Customer;
         public int CustomerGeneration;
@@ -91,12 +99,21 @@ namespace CardShopCoop.Modules.Trade
         public bool Accepted;
     }
 
-    /// <summary>One authoritative offer upsert or removal. A host-local delta has an empty
-    /// ActionId; an accepted guest action carries that action's prediction id.</summary>
+    /// <summary>The acting client's authoritative offer result: the post-action offer state, the
+    /// outcome, and whether the offer was removed.</summary>
+    [NetworkMessage]
+    public sealed class TradeOfferResponse : ActionResponseMessage
+    {
+        public InteractableCashierCounter Counter;
+        public TradeOutcome Outcome;
+        public bool Removed;
+        public TradeOfferState Offer;
+    }
+
+    /// <summary>One authoritative offer upsert or removal for peers other than the actor.</summary>
     [NetworkMessage]
     public sealed class TradeOfferDeltaMessage : INetMessage
     {
-        public Guid ActionId;
         public InteractableCashierCounter Counter;
         public TradeOutcome Outcome;
         public bool Removed;

@@ -211,56 +211,53 @@ namespace CardShopCoop.Modules.Catalog
         {
             var sideEffectIndex = -1;
             RestockData sideEffectData = null;
-            ActionLedger.AckOrApply(message.ActionId, () =>
+            if (message.Scanner)
             {
-                if (message.Scanner)
+                CPlayerData.m_IsScannerRestockUnlocked = message.Unlocked;
+                if (message.Unlocked)
                 {
-                    CPlayerData.m_IsScannerRestockUnlocked = message.Unlocked;
-                    if (message.Unlocked)
-                    {
-                        CEventManager.QueueEvent(new CEventPlayer_ScannerRestockUnlocked());
-                    }
-
-                }
-                else
-                {
-                    if (!CatalogInterop.TryResolve(message.ItemType, message.IsBigBox,
-                        message.Name ?? "", out var index, out var data) || data == null)
-                    {
-                        // The name-wire converter uses EItemType.None when a negotiated host
-                        // product has no local counterpart. Reconcile the prediction but do not
-                        // invent a local entitlement for content this process cannot represent.
-                        if (message.ItemType == EItemType.None)
-                        {
-                            return;
-                        }
-
-
-                        throw new InvalidOperationException("Catalog delta product could not be resolved");
-                    }
-                    var wasUnlocked = CPlayerData.GetIsItemLicenseUnlocked(index);
-                    if (!CatalogInterop.SetLicense(index, message.Unlocked))
-                    {
-
-                        throw new InvalidOperationException("Catalog delta license apply failed");
-                    }
-
-
-                    if (!message.Unlocked)
-                    {
-                        _active._productSideEffectsApplied.Remove(index);
-                    }
-
-                    else if (!wasUnlocked)
-                    {
-                        sideEffectIndex = index;
-                        sideEffectData = data;
-                    }
+                    CEventManager.QueueEvent(new CEventPlayer_ScannerRestockUnlocked());
                 }
 
-                RefreshOpenProductPanels();
-                RefreshOpenScannerScreens();
-            });
+            }
+            else
+            {
+                if (!CatalogInterop.TryResolve(message.ItemType, message.IsBigBox,
+                    message.Name ?? "", out var index, out var data) || data == null)
+                {
+                    // The name-wire converter uses EItemType.None when a negotiated host
+                    // product has no local counterpart. Do not invent a local entitlement for
+                    // content this process cannot represent.
+                    if (message.ItemType == EItemType.None)
+                    {
+                        return true;
+                    }
+
+
+                    throw new InvalidOperationException("Catalog delta product could not be resolved");
+                }
+                var wasUnlocked = CPlayerData.GetIsItemLicenseUnlocked(index);
+                if (!CatalogInterop.SetLicense(index, message.Unlocked))
+                {
+
+                    throw new InvalidOperationException("Catalog delta license apply failed");
+                }
+
+
+                if (!message.Unlocked)
+                {
+                    _active._productSideEffectsApplied.Remove(index);
+                }
+
+                else if (!wasUnlocked)
+                {
+                    sideEffectIndex = index;
+                    sideEffectData = data;
+                }
+            }
+
+            RefreshOpenProductPanels();
+            RefreshOpenScannerScreens();
             if (sideEffectData != null)
             {
                 ApplyProductEntitlementSideEffectsOnce(sideEffectIndex, sideEffectData);
@@ -272,14 +269,7 @@ namespace CardShopCoop.Modules.Catalog
 
         private void DeferDelta(CatalogLicenseDeltaMessage message)
         {
-            var key = DeltaKey(message);
-            if (_pendingDeltas.TryGetValue(key, out var previous))
-            {
-                ActionLedger.Ack(previous.ActionId);
-            }
-
-
-            _pendingDeltas[key] = message;
+            _pendingDeltas[DeltaKey(message)] = message;
         }
 
         private static string DeltaKey(CatalogLicenseDeltaMessage message)
@@ -354,12 +344,6 @@ namespace CardShopCoop.Modules.Catalog
 
         private void ClearPendingDeltas()
         {
-            foreach (var delta in _pendingDeltas.Values)
-            {
-                ActionLedger.Ack(delta.ActionId);
-            }
-
-
             _pendingDeltas.Clear();
         }
 

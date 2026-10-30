@@ -33,14 +33,17 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             BoxIdentityLifecycle.Reset();
         }
 
-        /// <summary>Sends one identity-owned intent on the host lane. The caller has already
-        /// stamped the prediction id and the world metadata.</summary>
+        /// <summary>Sends one identity-owned intent on the host lane. The caller supplies the
+        /// world payload; the framework assigns the action id and records the prediction.</summary>
         internal static void SendToHost(WorldMessage message)
         {
             var active = Active
                 ?? throw new InvalidOperationException(
                     "The identity box client is not active; cannot send a box intent.");
-            active.RuntimeContext.Send(1, message);
+            var context = active.Context
+                ?? throw new InvalidOperationException(
+                    "The identity box client has no live co-op session; cannot send a box intent.");
+            context.Send(message);
         }
     }
 
@@ -511,7 +514,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                     var intent = new FurnitureDestroyIntent
                     {
                         Entity = furniture,
-                        ActionId = Guid.NewGuid(),
                     };
                     GameObjectIdentityClientBehaviour.SendToHost(intent);
                     CoopPlugin.Log.LogInfo("[box-id] forwarded furniture destroy id="
@@ -553,7 +555,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             var intent = new BoxDestroyRequestMessage
             {
                 BoxNetworkId = capture.Id,
-                ActionId = Guid.NewGuid(),
             };
             GameObjectIdentityClientBehaviour.SendToHost(intent);
         }

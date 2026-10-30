@@ -8,7 +8,7 @@ namespace CardShopCoop.Net
     /// <summary>One received message, already reassembled and decoded from the wire.
     /// Transports never expose partial frames to callers. For transports using the raw-frame
     /// seam, this value is produced on the Unity thread by the application codec.</summary>
-    public struct InMsg
+    internal struct InMsg
     {
         public PeerConnection Connection;
         public INetMessage Message;
@@ -26,7 +26,7 @@ namespace CardShopCoop.Net
     }
 
     /// <summary>Why a peer connection ended, delivered with the transport's disconnect queue.</summary>
-    public sealed class ConnectionEvent
+    internal sealed class ConnectionEvent
     {
         public PeerConnection Connection
         {
@@ -55,7 +55,7 @@ namespace CardShopCoop.Net
     /// <see cref="Networking.INetworkingBackend"/>; the runtime creates and owns this transport,
     /// the peer identities, and the id bands.
     /// </summary>
-    public interface ICoopTransport : IDisposable
+    internal interface ICoopTransport : IDisposable
     {
         /// <summary>
         /// Removes one decoded message and releases the transport's incoming-byte admission for
@@ -117,17 +117,17 @@ namespace CardShopCoop.Net
 
     /// <summary>
     /// Internal control-plane admission used only by Core for the named application handshake.
-    /// Keeping this separate from the public send surface prevents external callers from
-    /// bypassing the Handshaking admission gate.
+    /// Keeping this separate from the send surface prevents module callers from bypassing the
+    /// Handshaking admission gate.
     /// </summary>
-    public interface ICoopHandshakeTransport
+    internal interface ICoopHandshakeTransport
     {
         void SendHandshake(PeerConnection connection, INetMessage message);
     }
 
     /// <summary>Lifecycle seam: a transport whose bearer must be started on the network pump
     /// thread. The runtime wraps contributed transports in NetworkPump, which starts them here.</summary>
-    public interface ICoopStartable
+    internal interface ICoopStartable
     {
         void Start();
     }
@@ -139,7 +139,7 @@ namespace CardShopCoop.Net
     /// completing the named handshake, or has not yet activated compact message ids is skipped
     /// rather than treated as a hard send failure.
     /// </summary>
-    public interface ICoopRelayTransport
+    internal interface ICoopRelayTransport
     {
         void Relay(INetMessage message, int exceptConnectionId);
     }

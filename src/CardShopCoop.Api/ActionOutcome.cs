@@ -2,29 +2,23 @@ using System;
 
 namespace CardShopCoop.Api
 {
-    /// <summary>How a host handler wants one <see cref="ActionMessage"/> resolved.</summary>
+    /// <summary>How a host handler resolved one <see cref="ActionMessage"/>.</summary>
     public enum ActionDisposition : byte
     {
-        /// <summary>No decision was produced. The framework treats this as a rejection.</summary>
-        None = 0,
+        /// <summary>The host applied the action. The client keeps its prediction and merges the
+        /// response state.</summary>
+        Applied = 1,
 
-        /// <summary>The framework should run <see cref="ActionMessage.OnApply"/> on the host,
-        /// then send the response.</summary>
-        Apply = 1,
-
-        /// <summary>The handler already applied the command on the host; the framework must not
-        /// run <see cref="ActionMessage.OnApply"/> again.</summary>
-        Applied = 2,
-
-        /// <summary>The host did not apply the command. The client reverses its prediction with
-        /// <see cref="ActionMessage.OnUndo"/>.</summary>
-        Reject = 3,
+        /// <summary>The host did not apply the action. The client reverses its prediction with
+        /// <see cref="ActionMessage.OnUndo"/> and then merges the response state.</summary>
+        Reject = 2,
     }
 
     /// <summary>
-    /// The mandatory return value of an <see cref="ActionMessage"/> handler. The handler chooses
-    /// whether the host applies the command through <see cref="ActionMessage.OnApply"/>, has
-    /// already applied it, or rejects it before applying.
+    /// The mandatory return value of an <see cref="ActionMessage"/> handler. The handler always
+    /// applies the command itself on the host, then reports <see cref="Applied"/> or
+    /// <see cref="Reject"/>. The response travels back to the acting client, where it merges the
+    /// authoritative state; a payload-less outcome still settles the action.
     /// </summary>
     public readonly struct ActionOutcome
     {
@@ -41,8 +35,8 @@ namespace CardShopCoop.Api
             get;
         }
 
-        /// <summary>Optional payload sent to the requesting client. Null sends only the internal
-        /// accept/rollback control, with no custom response message.</summary>
+        /// <summary>Optional actor-only state sent back to the requesting client. Null when the
+        /// action needs no custom payload; the framework still settles it.</summary>
         public ActionResponseMessage Response
         {
             get;
@@ -53,9 +47,6 @@ namespace CardShopCoop.Api
         {
             get;
         }
-
-        public static ActionOutcome Apply(ActionResponseMessage response = null)
-            => new(ActionDisposition.Apply, response, null);
 
         public static ActionOutcome Applied(ActionResponseMessage response = null)
             => new(ActionDisposition.Applied, response, null);
