@@ -57,6 +57,9 @@ public sealed class ShopTaxRate
 Global<ShopTaxRate>.Value = new ShopTaxRate { Percent = 5 };
 Global<ShopTaxRate>.Mutate(t => new ShopTaxRate { Percent = (t?.Percent ?? 0) + 1 });
 
+// Host only: remove it. Handlers receive null.
+Global<ShopTaxRate>.Value = null;
+
 // Any peer: read the last authoritative value. Late joiners get it automatically.
 var tax = Global<ShopTaxRate>.Value; // null when unset
 ```
@@ -450,6 +453,7 @@ foreach (ICoopPeer peer in Context.Peers) // the other players
 | Send to one peer | `peer.Send(message)` |
 | Read this player and the host | `Context.Self`, `Context.Host` |
 | Read the other players | `Context.Peers` |
+| Read the full roster, including this player | `Context.Players` |
 | Get the player behind a peer | `peer.Player` (a `PlayerRef`) |
 
 On a client, `peer.Send` only works when the peer is the host. On the host, it works for any peer.
@@ -463,8 +467,9 @@ A client's `Context.Broadcast` sends to the host.
   it to its stable identity; do not add an id field. A null field means the object is not
   present on that peer; ignore that update.
 - Use `PlayerRef` to name a player. `Context.Self.Player`, `Context.Host.Player`, and
-  `peer.Player` are the `PlayerRef`s for the roster. A `PlayerRef` is presentation data, not
-  authentication.
+  `peer.Player` are the `PlayerRef`s for the roster. `Context.Players` is the full roster, host
+  first and including this player; use it when a DTO must name someone other than the sender. A
+  `PlayerRef` is presentation data, not authentication.
 - The authenticated sender of a message is `CoopMessageContext.Peer`. Its `Player` is the
   sender's `PlayerRef` and its `Name` is safe to log. Never trust a player field inside a DTO.
 - On the host, `ActionMessage.Peer` is filled with the same authenticated sender before the
@@ -537,6 +542,7 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 | Send to everyone except one peer (host) | `Context.BroadcastExcept(peer, msg)` |
 | Send to one peer | `peer.Send(msg)` |
 | Read this player, the host, and the other players | `Context.Self`, `Context.Host`, `Context.Peers` |
+| Read the full player roster, including this player | `Context.Players` |
 | Run code when a peer joins | `[OnClientJoined]`, `[OnFullyJoined]` |
 | Log | `CoopLog.Info/Warn/Error` |
 | Resolve an optional game type | `CoopReflection.OptionalType/Field/Method/Property` |

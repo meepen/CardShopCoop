@@ -13,6 +13,7 @@ namespace CardShopCoop.Api
             Reason = reason;
         }
 
+        /// <summary>True when the intent is allowed; false when it is denied.</summary>
         public bool Allowed
         {
             get;
@@ -24,8 +25,11 @@ namespace CardShopCoop.Api
             get;
         }
 
+        /// <summary>Allows the intent and lets the handler run.</summary>
         public static IntentValidation Allow() => new(true, null);
 
+        /// <summary>Denies the intent with a player-readable reason. A null or empty reason
+        /// becomes "rejected by host".</summary>
         public static IntentValidation Deny(string reason)
             => new(false, string.IsNullOrEmpty(reason) ? "rejected by host" : reason);
     }
