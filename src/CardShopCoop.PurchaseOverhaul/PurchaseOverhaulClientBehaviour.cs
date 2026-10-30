@@ -1,10 +1,8 @@
 using System;
-using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net.Connection;
 using HarmonyLib;
-using UnityEngine;
 
 namespace CardShopCoop.PurchaseOverhaul
 {
@@ -17,16 +15,13 @@ namespace CardShopCoop.PurchaseOverhaul
     public sealed class PurchaseOverhaulClientBehaviour : CoopBehaviour
     {
         private static PurchaseOverhaulClientBehaviour _active;
-        private bool _shutdown;
-        private bool _initialized;
-        private bool _joined;
         private bool _pending;
 
         internal static PurchaseOverhaulClientBehaviour Active => _active;
 
         private void OnEnable()
         {
-            if (_shutdown || _initialized)
+            if (_active != null)
             {
                 return;
             }
@@ -45,34 +40,22 @@ namespace CardShopCoop.PurchaseOverhaul
 
                 throw;
             }
-
-            _initialized = true;
         }
-
-        [OnFullyJoined]
-        private void MarkJoined(PeerConnection _) => _joined = true;
 
         [OnClientDisconnected]
         private void ForgetHost(PeerConnection _, DisconnectInfo __)
         {
-            _joined = false;
             _pending = false;
         }
 
         internal void Shutdown()
         {
-            if (_shutdown)
+            if (!ReferenceEquals(_active, this))
             {
                 return;
             }
 
-            _shutdown = true;
-            if (ReferenceEquals(_active, this))
-            {
-                _active = null;
-            }
-
-            _joined = false;
+            _active = null;
             _pending = false;
         }
 
@@ -137,7 +120,7 @@ namespace CardShopCoop.PurchaseOverhaul
 
         private bool CanSend(out string message)
         {
-            if (!_joined || Context == null || !Context.InGame)
+            if (Context == null || !Context.InGame)
             {
                 message = "Waiting for co-op to finish joining.";
                 return false;
