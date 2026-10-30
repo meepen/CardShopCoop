@@ -817,7 +817,7 @@ namespace CardShopCoop.UI
             NativeCoopUi.Text(diagRt, "Diagnostic Tools", 20f, 20f, 12f, 920f, 32f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
             NativeCoopUi.Button(diagRt, "Copy Diagnostics", NativeCoopUi.Grey, OnCopyDiagnostics, 20f, 50f, 300f, 48f, 20f);
             NativeCoopUi.Button(diagRt, "Reset Defaults", NativeCoopUi.Orange, OnResetDefaults, 340f, 50f, 220f, 48f, 20f);
-            NativeCoopUi.Text(diagRt, "Copies the diagnostic report (.md) and this process's log (.log) to the clipboard.", 16f, 20f, 104f, 920f, 26f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Text(diagRt, "Attaches the report, raw LogOutput.log and Player.log as one paste.", 16f, 20f, 104f, 920f, 26f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
         }
 
         private static void BuildCharacter(Transform p)

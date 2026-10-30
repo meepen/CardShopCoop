@@ -119,12 +119,20 @@ If it persists, report it.
 Bugs get fixed fast when the report is good.
 
 **1. Logs from BOTH PCs.** This is the big one — most bugs are only visible by
-comparing the two sides. In your game folder:
+comparing the two sides. Do this on each PC:
 
-- `BepInEx\CardShopCoopCommunity_<number>.log` ← the important one (the number is the game's process id)
-- `BepInEx\LogOutput.log` ← also helpful if the mod isn't loading at all
+- Open the co-op window's **Advanced Options** tab and press **Copy Diagnostics**.
+- Paste once in Discord. That one paste carries the report (`CardShopCoop_Diagnostics_<number>.md`),
+  `BepInEx\LogOutput.log`, and Unity's `Player.log` together.
 
-Grab the newest one from right after the problem happened, and say which log is
+The log files are attached exactly as they are on disk, so they can contain player
+names and addresses. Send them where you would send the logs themselves.
+
+If you are picking files by hand instead, `BepInEx\CardShopCoopCommunity_<number>.log`
+is the important one (the number is the game's process id), and
+`BepInEx\LogOutput.log` is also helpful if the mod isn't loading at all.
+
+Grab the newest files from right after the problem happened, and say which PC is
 the host's.
 
 **2. Tell me:**
