@@ -35,6 +35,7 @@ namespace CardShopCoop.Modules.Actions
 
         private static readonly Dictionary<Guid, ActionRecord> ById = new();
         private static readonly Dictionary<string, List<ActionRecord>> ByKey = new(StringComparer.Ordinal);
+        private static readonly HashSet<Type> WarnedPredictionTypes = new();
         // Actions registered by a game-path hook while a reconcile is running. The reconcile
         // iterates snapshots of its key list, so a live append from inside an undo/apply would
         // otherwise race the loop; these are registered in order once the reconcile finishes.
@@ -144,6 +145,8 @@ namespace CardShopCoop.Modules.Actions
             {
                 throw new ArgumentNullException(nameof(message));
             }
+
+            WarnPredictionWithoutUndo(message.GetType());
 
             var runtime = CoopCore.Instance?.LiveContext;
             if (runtime == null)
@@ -273,6 +276,22 @@ namespace CardShopCoop.Modules.Actions
             var result = entityFields.ToArray();
             EntityFieldsByType[type] = result;
             return result;
+        }
+
+        private static void WarnPredictionWithoutUndo(Type type)
+        {
+            if (type == null || !WarnedPredictionTypes.Add(type))
+            {
+                return;
+            }
+
+            if (ActionMessageMetadata.OverridesOnApply(type)
+                && !ActionMessageMetadata.OverridesOnUndo(type))
+            {
+                CoopPlugin.Log.LogWarning("ActionMessage " + type.FullName
+                    + " overrides OnApply but not OnUndo; a rejected prediction will not be "
+                    + "reversed.");
+            }
         }
 
         private static Guid Record(string key, Action<Guid> send, Action apply,

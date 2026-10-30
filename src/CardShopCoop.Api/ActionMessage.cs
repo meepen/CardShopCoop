@@ -35,11 +35,17 @@ namespace CardShopCoop.Api
         /// <summary>Runs on the host when the handler returns <see cref="ActionOutcome.Apply"/>,
         /// and on the client when a rejected action's newer neighbours are replayed. The client
         /// performs its initial local prediction before sending; this is not called on send.
-        /// </summary>
-        public abstract void OnApply();
+        /// The default is a no-op: a handler that applies the command itself returns
+        /// <see cref="ActionOutcome.Applied"/> and does not need to override this.</summary>
+        public virtual void OnApply()
+        {
+        }
 
-        /// <summary>Reverses this action's local prediction when the host rejects it.</summary>
-        public abstract void OnUndo(ActionResponseMessage response);
+        /// <summary>Reverses this action's local prediction when the host rejects it. The default
+        /// is a no-op; an action that predicts locally must override it.</summary>
+        public virtual void OnUndo(ActionResponseMessage response)
+        {
+        }
 
         /// <summary>Merges an accepted authoritative response into this action's local state.
         /// Only called for an accepted response; rejections use <see cref="OnUndo"/>.</summary>

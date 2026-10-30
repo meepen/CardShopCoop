@@ -1102,6 +1102,15 @@ namespace CardShopCoop.Net
             switch (outcome.Disposition)
             {
                 case ActionDisposition.Apply:
+                    if (!ActionMessageMetadata.OverridesOnApply(action.GetType()))
+                    {
+                        CoopPlugin.Log.LogError("action handler returned ActionOutcome.Apply for "
+                            + action.GetType().FullName + " but the action does not override "
+                            + "OnApply; rejecting instead of silently doing nothing.");
+                        RejectActionOutcome(context, action, outcome);
+                        return DispatchOutcome.Handled;
+                    }
+
                     try
                     {
                         action.OnApply();
