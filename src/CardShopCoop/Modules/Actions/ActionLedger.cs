@@ -229,6 +229,11 @@ namespace CardShopCoop.Modules.Actions
 
         private static string AutoKey(ActionMessage message)
         {
+            if (!string.IsNullOrEmpty(message.ActionKey))
+            {
+                return "action:" + message.ActionKey;
+            }
+
             var type = message.GetType();
             var fields = EntityFields(type);
             if (fields.Length == 0)

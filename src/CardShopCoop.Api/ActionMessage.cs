@@ -21,6 +21,13 @@ namespace CardShopCoop.Api
             get; set;
         }
 
+        /// <summary>Optional local-only grouping key for the action ledger. Two commands with the
+        /// same key are reconciled as an ordered chain. Leave this null to use the action's live
+        /// entity fields, or set a unique value when several independent commands of the same type
+        /// may be in flight at once. Never serialized.</summary>
+        [NonSerialized]
+        public string ActionKey;
+
         /// <summary>The authenticated player whose action the host is applying, filled by the
         /// framework before the host handler runs. Null on a client and outside dispatch. Never
         /// serialized: the sender comes from the connection, not the payload.</summary>

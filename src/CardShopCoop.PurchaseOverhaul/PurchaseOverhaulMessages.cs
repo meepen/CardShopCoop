@@ -14,6 +14,11 @@ namespace CardShopCoop.PurchaseOverhaul
         public List<string> ProductIds = new();
         public List<int> Boxes = new();
 
+        public PurchaseOrderRequest()
+        {
+            ActionKey = Guid.NewGuid().ToString("N");
+        }
+
         public override void OnUndo(ActionResponseMessage response)
             => PurchaseOverhaulClientBehaviour.Active?.CompleteOrder(response);
 
@@ -39,6 +44,11 @@ namespace CardShopCoop.PurchaseOverhaul
     public sealed class PurchaseLicenseRequest : ActionMessage
     {
         public string ProductId = "";
+
+        public PurchaseLicenseRequest()
+        {
+            ActionKey = Guid.NewGuid().ToString("N");
+        }
 
         public override void OnUndo(ActionResponseMessage response)
             => PurchaseOverhaulClientBehaviour.Active?.CompleteLicense(response);

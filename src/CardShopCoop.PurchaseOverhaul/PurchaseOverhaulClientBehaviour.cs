@@ -1,7 +1,6 @@
 using System;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Net.Connection;
 using HarmonyLib;
 
 namespace CardShopCoop.PurchaseOverhaul
@@ -15,7 +14,6 @@ namespace CardShopCoop.PurchaseOverhaul
     public sealed class PurchaseOverhaulClientBehaviour : CoopBehaviour
     {
         private static PurchaseOverhaulClientBehaviour _active;
-        private bool _pending;
 
         internal static PurchaseOverhaulClientBehaviour Active => _active;
 
@@ -42,12 +40,6 @@ namespace CardShopCoop.PurchaseOverhaul
             }
         }
 
-        [OnClientDisconnected]
-        private void ForgetHost(PeerConnection _, DisconnectInfo __)
-        {
-            _pending = false;
-        }
-
         internal void Shutdown()
         {
             if (!ReferenceEquals(_active, this))
@@ -56,7 +48,6 @@ namespace CardShopCoop.PurchaseOverhaul
             }
 
             _active = null;
-            _pending = false;
         }
 
         private void OnDestroy() => Shutdown();
@@ -132,12 +123,6 @@ namespace CardShopCoop.PurchaseOverhaul
                 return false;
             }
 
-            if (_pending)
-            {
-                message = "Waiting for the host to confirm the last purchase.";
-                return false;
-            }
-
             message = null;
             return true;
         }
@@ -161,14 +146,12 @@ namespace CardShopCoop.PurchaseOverhaul
                 Boxes = boxes,
             };
 
-            _pending = true;
             try
             {
                 Context.Send(Context.HostConnection, request);
             }
             catch (Exception error)
             {
-                _pending = false;
                 message = "The order could not be sent: " + error.Message;
                 CoopLog.Warn(message);
                 return false;
@@ -204,14 +187,12 @@ namespace CardShopCoop.PurchaseOverhaul
                 ProductId = id,
             };
 
-            _pending = true;
             try
             {
                 Context.Send(Context.HostConnection, request);
             }
             catch (Exception error)
             {
-                _pending = false;
                 message = "The licence request could not be sent: " + error.Message;
                 CoopLog.Warn(message);
                 return false;
@@ -223,7 +204,6 @@ namespace CardShopCoop.PurchaseOverhaul
 
         internal void CompleteOrder(ActionResponseMessage response)
         {
-            _pending = false;
             var result = response as PurchaseOrderResult;
             if (result != null && result.Success && !result.Rejected)
             {
@@ -237,7 +217,6 @@ namespace CardShopCoop.PurchaseOverhaul
 
         internal void CompleteLicense(ActionResponseMessage response)
         {
-            _pending = false;
             var result = response as PurchaseLicenseResult;
             if (result != null && result.Success && !result.Rejected)
             {
