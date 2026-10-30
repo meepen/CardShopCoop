@@ -18,6 +18,9 @@ namespace CardShopCoop.Api
     /// </summary>
     public static class Global<T> where T : class
     {
+        /// <summary>The current session-wide value, or null when it is unset or co-op is not
+        /// loaded. The setter publishes through host authority; on a client the store keeps the
+        /// previous value until the host echo arrives. Set null to remove the value.</summary>
         public static T Value
         {
             get => CoopApi.GetGlobalInformation<T>();

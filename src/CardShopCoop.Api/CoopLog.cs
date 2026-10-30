@@ -8,7 +8,7 @@ namespace CardShopCoop.Api
     /// <summary>
     /// Optional-dependency-safe logging for integrating mods. Every call no-ops when the API is
     /// loaded but CardShopCoopCommunity has not installed its binding. Because the API assembly ships with
-    /// CardShopCoopCommunity, a direct call when CardShopCoopCommunity may be absent must still be guarded — see
+    /// CardShopCoopCommunity, a direct call when CardShopCoopCommunity may be absent must still be guarded - see
     /// <see cref="CoopApi"/> for the guard pattern.
     /// </summary>
     public static class CoopLog
@@ -21,15 +21,20 @@ namespace CardShopCoop.Api
         /// <summary>When each key was last reported, for <see cref="FirstWithin"/>.</summary>
         private static readonly ConcurrentDictionary<string, int> LastReported = new();
 
+        /// <summary>Writes an informational line through the shared CardShopCoop log.</summary>
         public static void Info(string message) => Safe(log => log.LogInfo(message));
 
+        /// <summary>Writes a warning line through the shared CardShopCoop log.</summary>
         public static void Warn(string message) => Safe(log => log.LogWarning(message));
 
+        /// <summary>Writes an error line through the shared CardShopCoop log.</summary>
         public static void Error(string message) => Safe(log => log.LogError(message));
 
+        /// <summary>Writes a warning line for a contained exception, tagged with caller context.</summary>
         public static void Warn(Exception exception)
             => Safe(log => log.LogWarning("[caught] " + exception));
 
+        /// <summary>Writes an error line for an exception.</summary>
         public static void Error(Exception exception)
             => Safe(log => log.LogError(exception));
 

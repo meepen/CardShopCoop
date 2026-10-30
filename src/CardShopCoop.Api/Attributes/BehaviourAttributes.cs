@@ -39,21 +39,38 @@ namespace CardShopCoop.Attributes
     {
     }
 
+    /// <summary>
+    /// Invoked when a peer leaves the session. The method takes an <c>ICoopPeer</c> and a
+    /// <see cref="CardShopCoop.Net.Connection.DisconnectInfo"/> parameter.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Method, Inherited = false)]
     public sealed class OnClientDisconnectedAttribute : Attribute
     {
     }
 
+    /// <summary>
+    /// Invoked when a peer is fully in the game and application traffic is allowed. On the host,
+    /// this is the point to send a join baseline to the <c>ICoopPeer</c> the method receives.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Method, Inherited = false)]
     public sealed class OnFullyJoinedAttribute : Attribute
     {
     }
 
+    /// <summary>
+    /// Invoked once for this peer when a co-op session starts. A session behaviour receives it
+    /// after the transport starts and the message and extended-information catalogs are frozen; a
+    /// persistent behaviour receives it before the transport starts.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Method, Inherited = false)]
     public sealed class OnSessionStartedAttribute : Attribute
     {
     }
 
+    /// <summary>
+    /// Invoked once for this peer when the co-op session ends. A persistent behaviour receives it
+    /// after the transport stops.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Method, Inherited = false)]
     public sealed class OnSessionStoppedAttribute : Attribute
     {

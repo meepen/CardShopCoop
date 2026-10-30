@@ -6,7 +6,10 @@ custom transports. The complete working example is
 [`samples/CardShopCoop.SampleMod`](../samples/CardShopCoop.SampleMod).
 
 The API lives in these namespaces: `CardShopCoop.Api`, `CardShopCoop.Attributes`,
-`CardShopCoop.Net`, and `CardShopCoop.Net.Connection`.
+`CardShopCoop.Net`, `CardShopCoop.Net.Connection`, `CardShopCoop.Net.Networking`,
+`CardShopCoop.Net.Datagrams`, and `CardShopCoop.Net.Protocol`. Most integrations need only the
+first four; custom transports use the networking and datagram namespaces, and `Reliability` lives
+in `CardShopCoop.Net.Protocol`.
 
 ## 1. Setup
 
@@ -71,6 +74,9 @@ React on any peer:
 private void OnTax(ShopTaxRate tax) // null when removed
     => _label.text = tax == null ? "-" : tax.Percent + "%";
 ```
+
+The handler may take the raw `T` or `InformationChange<T>`. The raw form is the current value
+(null on removal); the change form also exposes `Previous`, `Removed`, and `IsFirstValue`.
 
 `Global<T>` handles host authority, the broadcast, and the join baseline. `Context` is assigned
 before `OnEnable`, so use it directly.
@@ -226,6 +232,9 @@ private void OnColor(InteractableObject shelf, InformationChange<ShelfColor> cha
 }
 ```
 
+`[ExtendedInformationHandler]` accepts the entity and information parameters in either order, and
+the information parameter may be the raw value or `InformationChange<T>`.
+
 For a session-wide value, use `[GlobalInformation]` + `Global<T>` from the quick start. Join
 baselines are automatic for both extended information and global values.
 
@@ -329,6 +338,38 @@ public sealed class MoveObjectHost : CoopBehaviour
 - Do not write a handler for an `ActionResponseMessage`. The framework delivers it to the action
   that sent it. Return the response from the outcome; do not send it yourself.
 
+### Validate before the handler
+
+A host can reject a client intent before the handler runs. Put `[IntentValidator]` on a
+`[ServerBehaviour]` method that takes a `CoopMessageContext` and the message, in either order,
+and returns `IntentValidation`:
+
+```csharp
+[IntentValidator]
+private IntentValidation ValidateMove(CoopMessageContext from, MoveObjectAction action)
+    => CanMove(action.Target)
+        ? IntentValidation.Allow()
+        : IntentValidation.Deny("the object cannot move now");
+```
+
+The validator runs on the host before the handler. A denial skips the handler. For an
+`ActionMessage` it sends the rejection to the client and makes the client's `OnUndo` run; for a
+one-way `INetMessage`, the denied message is simply dropped. Use `[IntentRejected]` when a denial
+must publish authoritative state before the framework sends the rejection; for example, write an
+`IActionValue` with the action id and `Rejected = true`:
+
+```csharp
+[IntentRejected]
+private void OnMoveRejected(CoopMessageContext from, MoveObjectAction action, string reason)
+{
+    // Publish authoritative state before the framework rejects the action.
+}
+```
+
+The rejection hook takes the context, the message, and the reason, in any order. Simple
+validation can still return `ActionOutcome.Reject(...)` from the handler; the validator path is
+for checks that must run before any handler code.
+
 ### Undo and merge
 
 - `OnUndo(response)` runs on the client only when the host refuses the action. Reverse the local
@@ -373,8 +414,9 @@ Use `INetMessage` for anything that is not a discrete command another player can
 - a message that only one side needs to hear.
 
 Never predict an `INetMessage`. There is no undo for it and no response, so the sender cannot learn
-that it was wrong. Actions are always reliable; do not mark them `Reliability.Transient`. Transient
-is only for small `INetMessage` updates that can be lost without breaking the game.
+that it was wrong. Actions are always reliable; do not mark them `Reliability.Transient`
+(`Reliability` is in `CardShopCoop.Net.Protocol`). Transient is only for small `INetMessage`
+updates that can be lost without breaking the game.
 
 Do not use an action for extended information. A client `SetExtendedInformation` is already
 host-authoritative: the host applies it, broadcasts the result, and late joiners get it in the
@@ -425,6 +467,9 @@ A client's `Context.Broadcast` sends to the host.
   authentication.
 - The authenticated sender of a message is `CoopMessageContext.Peer`. Its `Player` is the
   sender's `PlayerRef` and its `Name` is safe to log. Never trust a player field inside a DTO.
+- On the host, `ActionMessage.Peer` is filled with the same authenticated sender before the
+  handler runs, for handlers that do not take a context. It is null on a client and outside
+  dispatch.
 - Address peers as objects (`ICoopPeer`), never by connection id. `Context.Send`,
   `Context.Broadcast`, `Context.BroadcastExcept`, and `peer.Send` are the only send calls.
 - The host is authoritative. Clients send actions; the host applies and broadcasts state.
@@ -439,7 +484,9 @@ A client's `Context.Broadcast` sends to the host.
 ## 9. Custom transports
 
 Implement `INetworkingBackend` (connect flow and UI) and `IDatagramTransport` (datagrams).
-CardShopCoop owns reliability, framing, peer identity, and authorization.
+`INetworkingBackend` is in `CardShopCoop.Net.Networking` and `IDatagramTransport` is in
+`CardShopCoop.Net.Datagrams`. CardShopCoop owns reliability, framing, peer identity, and
+authorization.
 
 ```csharp
 IDisposable handle = CoopApi.RegisterNetworkingBackend(new MyBackend());
@@ -499,4 +546,5 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 | Send a one-way event | a `[NetworkMessage]` `INetMessage` with a `void` handler |
 | Predict a client command | a `[NetworkMessage]` `ActionMessage`, then `Context.Send` |
 | Resolve a client command | return `ActionOutcome.Applied/Reject` from its `[MessageHandler]` |
+| Validate a client intent before its handler | `[IntentValidator]` + `IntentValidation.Allow/Deny`; `[IntentRejected]` for the denial hook |
 | Add a transport | `CoopApi.RegisterNetworkingBackend` |

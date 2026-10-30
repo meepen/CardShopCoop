@@ -15,7 +15,11 @@ namespace CardShopCoop.Api
     /// </summary>
     public abstract class ActionResponseMessage : INetMessage
     {
+        /// <summary>Correlation id copied from the <see cref="ActionMessage"/>; filled by the
+        /// framework.</summary>
         public Guid ActionId;
+
+        /// <summary>True when the host rejected the action; filled by the framework.</summary>
         public bool Rejected;
     }
 }

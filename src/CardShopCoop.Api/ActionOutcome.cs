@@ -30,6 +30,7 @@ namespace CardShopCoop.Api
             Reason = reason;
         }
 
+        /// <summary>Whether the host applied or rejected the action.</summary>
         public ActionDisposition Disposition
         {
             get;
@@ -48,9 +49,12 @@ namespace CardShopCoop.Api
             get;
         }
 
+        /// <summary>Creates an applied outcome with an optional actor-only response payload.</summary>
         public static ActionOutcome Applied(ActionResponseMessage response = null)
             => new(ActionDisposition.Applied, response, null);
 
+        /// <summary>Creates a rejected outcome with a reason and an optional actor-only response
+        /// payload.</summary>
         public static ActionOutcome Reject(string reason = null,
             ActionResponseMessage response = null)
             => new(ActionDisposition.Reject, response, reason);

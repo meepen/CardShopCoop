@@ -10,6 +10,8 @@ namespace CardShopCoop.Api
     /// </summary>
     public static class CoopReflection
     {
+        /// <summary>Resolves a type from an optional assembly. Returns null and logs once when the
+        /// type cannot be found.</summary>
         public static Type OptionalType(string typeName, string assemblyName)
         {
             var type = ResolveType(typeName, assemblyName);
@@ -21,6 +23,8 @@ namespace CardShopCoop.Api
             return type;
         }
 
+        /// <summary>Resolves a field by name. Returns null and logs once when the type or field is
+        /// missing.</summary>
         public static FieldInfo OptionalField(Type type, string name)
         {
             var field = type?.GetField(name, Flags);
@@ -32,6 +36,8 @@ namespace CardShopCoop.Api
             return field;
         }
 
+        /// <summary>Resolves a method by name and optional argument types. Returns null and logs
+        /// once when the type or method is missing.</summary>
         public static MethodInfo OptionalMethod(Type type, string name, params Type[] args)
         {
             var method = ResolveMethod(type, name, args);
@@ -43,6 +49,8 @@ namespace CardShopCoop.Api
             return method;
         }
 
+        /// <summary>Resolves a property by name. Returns null and logs once when the type or
+        /// property is missing.</summary>
         public static PropertyInfo OptionalProperty(Type type, string name)
         {
             var property = type?.GetProperty(name, Flags);
@@ -54,6 +62,8 @@ namespace CardShopCoop.Api
             return property;
         }
 
+        /// <summary>Resolves a field by name. Throws <see cref="MissingMemberException"/> when the
+        /// type or field is missing.</summary>
         public static FieldInfo RequiredField(Type type, string name)
         {
             var field = type?.GetField(name, Flags);
@@ -65,6 +75,8 @@ namespace CardShopCoop.Api
             return field;
         }
 
+        /// <summary>Resolves a method by name and optional argument types. Throws
+        /// <see cref="MissingMemberException"/> when the type or method is missing.</summary>
         public static MethodInfo RequiredMethod(Type type, string name, params Type[] args)
         {
             var method = ResolveMethod(type, name, args);
