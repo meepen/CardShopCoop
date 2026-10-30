@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
+      api_version: ${{ steps.version.outputs.api_version }}
     env:
       CARDSHOP_GAMEPATH: /game
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
@@ -40,6 +41,12 @@ jobs:
             exit 1
           }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          api_version=$(sed -n 's/.*<CardShopCoopApiVersion>\(.*\)<\/CardShopCoopApiVersion>.*/\1/p' Directory.Build.props)
+          [[ "$api_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Invalid CardShopCoopApiVersion: $api_version" >&2
+            exit 1
+          }
+          echo "api_version=$api_version" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag matches plugin version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -194,7 +201,7 @@ jobs:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ vars.NEXUSMODS_SAMPLE_FILE_ID }}
           filename: dist/CardShopCoop.SampleMod.zip
-          version: ${{ needs.build.outputs.version }}
+          version: ${{ needs.build.outputs.api_version }}
           category: miscellaneous
           display_name: CardShopCoop.SampleMod
           description: A template showing how other mods can integrate with CardShopCoop's co-op layer.

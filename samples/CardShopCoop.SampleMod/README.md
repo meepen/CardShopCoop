@@ -60,3 +60,7 @@ CardShopCoopCommunity, and shipping a second copy can load as a second assembly 
 
 The sample targets public API `2.3.0`, which ships with CardShopCoopCommunity 2.3.0. Rebuild the
 sample (and your own mod) when you update CardShopCoopCommunity.
+
+The sample's own version follows `CardShopCoopApiVersion` (currently `2.3.0`). It is published as a
+Nexus Mods "miscellaneous" source archive only; it is not a Thunderstore package or a GitHub release
+asset.

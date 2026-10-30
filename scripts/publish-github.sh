@@ -6,9 +6,9 @@
 #   scripts/publish-github.sh [version]
 #
 # Uses the "## <version>" section of CHANGELOG.md as the release body (so the player-facing notes are
-# published here too) and attaches the user-facing app zips. The Thunderstore-format zips are not
-# attached: they now carry the same file names as the app zips (different contents), and one release
-# cannot hold two assets with the same name. Runs independently of the Thunderstore/Nexus publishing,
+# published here too) and attaches the user-facing app zips. The Thunderstore-format zips and the
+# example-mod source zip are not attached: the example mod is published on Nexus Mods only, and one
+# release cannot hold two assets with the same name. Runs independently of the Thunderstore/Nexus publishing,
 # so a failure there cannot block this.
 #
 # Env:
@@ -33,7 +33,14 @@ if ! bash scripts/changelog-extract.sh "$version" > "$notes_file" 2>/dev/null; t
 fi
 
 shopt -s nullglob
-files=(dist/*.zip)
+files=()
+for file in dist/*.zip; do
+  # The example-mod source is published on Nexus Mods only.
+  if [[ "$(basename "$file")" == "CardShopCoop.SampleMod.zip" ]]; then
+    continue
+  fi
+  files+=("$file")
+done
 shopt -u nullglob
 if [[ ${#files[@]} -eq 0 ]]; then
   echo "error: no release assets found under dist/" >&2

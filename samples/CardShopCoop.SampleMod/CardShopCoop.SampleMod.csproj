@@ -5,7 +5,7 @@
     <AssemblyName>CardShopCoop.SampleMod</AssemblyName>
     <AssemblyTitle>CardShopCoop.SampleMod</AssemblyTitle>
     <RootNamespace>CardShopCoop.SampleMod</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>$(CardShopCoopApiVersion)</Version>
     <LangVersion>9</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>

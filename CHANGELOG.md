@@ -2,12 +2,12 @@
 
 ## 2.3.0
 
-- Co-op mods now use `ActionMessage` for anything a player predicts and may need to undo. A mod makes its local change immediately, the host applies or refuses it, and the mod reverses the change when it is refused. One-way messages and notifications use `INetMessage`.
-- Players are now addressed as peer objects (`Context.Self`, `Context.Host`, `Context.Peers`). The old connection-id send calls are gone.
-- There are no longer any action keys to assign or match. Each command is answered and cleaned up on its own.
-- External co-op mods must be rebuilt against the new public API. The old action helpers and send calls were removed.
-- The public API is versioned separately at `CardShopCoop.Api` 2.3.0, independent of future mod releases.
-- Both players must update together, as usual.
+- LOTS of prepwork for proper external mod compatibility:
+- Co-op mods now use `ActionMessage` for anything a player predicts and may need to undo.
+- Players are now addressed as peer objects (`Context.Self`, `Context.Host`, `Context.Peers`).
+- Public API now is versioned separately from the main mod, starting at 2.3.0
+- The example mod now follows the API version and is published only on Nexus Mods.
+- Fixed: Shelf cascading errors.
 
 ## 2.2.1
 

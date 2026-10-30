@@ -18,6 +18,6 @@ namespace CardShopCoop.SampleMod
     {
         public const string Guid = "com.example.cardshopcoopcommunity.sample";
         public const string Name = "CardShopCoopCommunity Sample Counter";
-        public const string Version = "1.0.0";
+        public const string Version = "2.3.0"; // Keep equal to CardShopCoopApiVersion.
     }
 }
