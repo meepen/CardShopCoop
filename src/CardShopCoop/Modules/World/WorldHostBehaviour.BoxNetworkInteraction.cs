@@ -32,7 +32,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>True when an authenticated, fully joined peer may act on shared world state.
         /// A guest in the transfer window already plays from the transferred save, so it counts
         /// as joined for these actions.</summary>
-        private static bool CanApplyWorldAction(MessageContext context)
+        private static bool CanApplyWorldAction(CoopMessageContext context)
             => context != null && context.InGame && context.IsAuthenticated;
 
         /// <summary>The host's canonical player id for the sender. A peer handle is the only
@@ -41,7 +41,7 @@ namespace CardShopCoop.Modules.World
         private static int PlayerIdOf(ICoopPeer peer) => peer?.Player?.Id ?? 0;
 
         [MessageHandler]
-        private ActionOutcome HandleBoxDestroyRequest(MessageContext context,
+        private ActionOutcome HandleBoxDestroyRequest(CoopMessageContext context,
             BoxDestroyRequestMessage message)
         {
             if (!CanApplyWorldAction(context) || message == null
@@ -68,7 +68,7 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleFurnitureDestroy(MessageContext context,
+        private ActionOutcome HandleFurnitureDestroy(CoopMessageContext context,
             FurnitureDestroyIntent message)
         {
             if (!CanApplyWorldAction(context) || message?.Entity == null)
@@ -92,7 +92,7 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleFurnitureBoxUp(MessageContext context,
+        private ActionOutcome HandleFurnitureBoxUp(CoopMessageContext context,
             FurnitureBoxUpRequestMessage message)
         {
             if (!CanApplyWorldAction(context) || message == null)
@@ -201,7 +201,7 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private ActionOutcome HandleBoxStateRequest(MessageContext context,
+        private ActionOutcome HandleBoxStateRequest(CoopMessageContext context,
             BoxStateRequestMessage message)
         {
             if (!CanApplyWorldAction(context) || message?.Box == null)
