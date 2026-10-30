@@ -39,9 +39,18 @@ cp "src/CardShopCoop.Api/bin/Release/CardShopCoop.Api.zip" dist/
 cp "src/CardShopCoop.CustomTv/bin/Release/CardShopCoop.ExternalModInterop.zip" dist/
 
 # Example-mod source, tracked files only (for a Nexus "miscellaneous" file). git archive excludes
-# bin/obj and anything else not committed.
-git archive --format=zip --prefix=CardShopCoop.SampleMod/ \
-  -o "dist/CardShopCoop.SampleMod.zip" HEAD:samples/CardShopCoop.SampleMod
+# bin/obj and anything else not committed. The API guide is included next to the sample so the
+# downloaded source is self-contained.
+sample_stage="$(mktemp -d)"
+sample_root="$sample_stage/CardShopCoop.SampleMod"
+mkdir -p "$sample_root/docs"
+git archive --format=tar HEAD:samples/CardShopCoop.SampleMod | tar -xf - -C "$sample_root"
+git show HEAD:docs/third-party-integration.md > "$sample_root/docs/third-party-integration.md"
+(
+  cd "$sample_stage"
+  zip -q -r "$root/dist/CardShopCoop.SampleMod.zip" CardShopCoop.SampleMod
+)
+rm -rf "$sample_stage"
 
 bash scripts/thunderstore-package.sh "$version"
 bash scripts/nexus-package.sh

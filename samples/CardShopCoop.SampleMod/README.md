@@ -23,6 +23,9 @@ work. No UI is drawn on purpose.
 | `SampleCounterHost.cs` | `[ServerBehaviour]`, join baseline, intent handling, broadcast |
 | `SampleCounterClient.cs` | `[ClientBehaviour]`, intent send, authoritative apply |
 
+The packaged sample-source zip also includes `docs/third-party-integration.md`, so the downloaded
+example carries the full API guide without needing the repository checkout.
+
 ## Build
 
 ```powershell
