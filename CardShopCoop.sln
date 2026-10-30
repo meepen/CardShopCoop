@@ -1,4 +1,4 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -16,6 +16,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CardShopCoop.SampleMod", "samples\CardShopCoop.SampleMod\CardShopCoop.SampleMod.csproj", "{78D63BEB-D2E4-430B-A2CA-9492858E9612}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CardShopCoop.Steam", "src\CardShopCoop.Steam\CardShopCoop.Steam.csproj", "{2AB8591B-348D-47CB-9371-DC25557A644C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CardShopCoop.PurchaseOverhaul", "src\CardShopCoop.PurchaseOverhaul\CardShopCoop.PurchaseOverhaul.csproj", "{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -104,6 +106,24 @@ Global
 		{2AB8591B-348D-47CB-9371-DC25557A644C}.Deploy|x64.Build.0 = Deploy|Any CPU
 		{2AB8591B-348D-47CB-9371-DC25557A644C}.Deploy|x86.ActiveCfg = Deploy|Any CPU
 		{2AB8591B-348D-47CB-9371-DC25557A644C}.Deploy|x86.Build.0 = Deploy|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Debug|x64.Build.0 = Debug|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Debug|x86.Build.0 = Debug|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Release|x64.ActiveCfg = Release|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Release|x64.Build.0 = Release|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Release|x86.ActiveCfg = Release|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Release|x86.Build.0 = Release|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Deploy|Any CPU.ActiveCfg = Deploy|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Deploy|Any CPU.Build.0 = Deploy|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Deploy|x64.ActiveCfg = Deploy|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Deploy|x64.Build.0 = Deploy|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Deploy|x86.ActiveCfg = Deploy|Any CPU
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697}.Deploy|x86.Build.0 = Deploy|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -114,5 +134,6 @@ Global
 		{6E4A8839-CE49-44A5-9147-0DF22453AF2C} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{78D63BEB-D2E4-430B-A2CA-9492858E9612} = {5D20AA90-6969-D8BD-9DCD-8634F4692FDA}
 		{2AB8591B-348D-47CB-9371-DC25557A644C} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{3A0DAF3A-1D38-4142-B9AD-3B32598BB697} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

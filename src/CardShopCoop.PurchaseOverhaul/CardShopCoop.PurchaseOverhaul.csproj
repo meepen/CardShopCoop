@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>CardShopCoop.PurchaseOverhaul</AssemblyName>
+    <AssemblyTitle>CardShopCoop.PurchaseOverhaul</AssemblyTitle>
+    <RootNamespace>CardShopCoop.PurchaseOverhaul</RootNamespace>
+    <Company>Devin 'Meepen' Korb</Company>
+    <Product>CardShopCoopCommunity Purchase Overhaul</Product>
+    <Description>Purchase Overhaul order and licence co-op sync for CardShopCoopCommunity. Optional separate download.</Description>
+    <Authors>Devin 'Meepen' Korb</Authors>
+    <Version>$(CardShopCoopVersion)</Version>
+    <LangVersion>9</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <ManagedPath>$(GamePath)/Card Shop Simulator_Data/Managed</ManagedPath>
+    <BepInExPath>$(GamePath)/BepInEx/core</BepInExPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copy-local is off: the API assembly ships with CardShopCoop core. -->
+    <ProjectReference Include="..\CardShopCoop.Api\CardShopCoop.Api.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExPath)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExPath)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedPath)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(IntermediateOutputPath)PurchaseOverhaulVersion.g.cs" />
+  </ItemGroup>
+
+  <Target Name="GeneratePurchaseOverhaulVersion" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <PurchaseOverhaulGeneratedSource>// &lt;auto-generated /&gt;&#xA;namespace CardShopCoop.PurchaseOverhaul&#xA;{&#xA;    public partial class PurchaseOverhaulPlugin&#xA;    {&#xA;        public const string Version = &quot;$(CardShopCoopVersion)&quot;%3B&#xA;    }&#xA;}</PurchaseOverhaulGeneratedSource>
+    </PropertyGroup>
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)PurchaseOverhaulVersion.g.cs"
+      Overwrite="true"
+      Lines="$(PurchaseOverhaulGeneratedSource)" />
+  </Target>
+
+  <Target Name="DeployPurchaseOverhaul" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DeployPath)/BepInEx/plugins" />
+  </Target>
+
+</Project>
