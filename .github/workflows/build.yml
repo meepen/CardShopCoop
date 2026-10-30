@@ -189,6 +189,7 @@ jobs:
           description: |
             Compatibility layer for the following mods:
             - RTCGO Custom TV
+            - Purchase Overhaul
           changelog: ${{ vars.NEXUSMODS_MOD_ID != '' && steps.changelog.outputs.text || '' }}
           mod_id: ${{ vars.NEXUSMODS_MOD_ID }}
 

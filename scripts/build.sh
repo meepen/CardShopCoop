@@ -8,7 +8,7 @@
 # Requires the game assemblies (GamePath / CARDSHOP_GAMEPATH) for compilation. Produces:
 #   dist/CardShopCoop.zip                       GitHub release / manual install
 #   dist/CardShopCoop.Api.zip                   API-only package
-#   dist/CardShopCoop.ExternalModInterop.zip    Custom TV bundle
+#   dist/CardShopCoop.ExternalModInterop.zip    Custom TV + Purchase Overhaul bundle
 #   dist/CardShopCoop.SampleMod.zip             Example-mod source (Nexus "miscellaneous")
 #   dist/thunderstore/...                       Thunderstore packages (see scripts/thunderstore-package.sh)
 #   dist/nexus/...                              Nexus Mods packages   (see scripts/nexus-package.sh)
@@ -32,6 +32,7 @@ mkdir -p dist
 dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode --configfile NuGet.Config
 dotnet build src/CardShopCoop.Api/CardShopCoop.Api.csproj -c Release -p:Package=true --no-restore
 dotnet build src/CardShopCoop/CardShopCoop.csproj -c Release -p:Deploy=false -p:Package=true --no-restore
+dotnet build src/CardShopCoop.PurchaseOverhaul/CardShopCoop.PurchaseOverhaul.csproj -c Release -p:Deploy=false
 dotnet build src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.csproj -c Release -p:Deploy=false -p:Package=true
 
 cp "src/CardShopCoop/bin/Release/CardShopCoop.zip" dist/

@@ -54,6 +54,7 @@ tv_pkg="$work/.tv"
 unzip_into "dist/CardShopCoop.ExternalModInterop.zip" "$tv_src"
 mkdir -p "$tv_pkg/BepInEx/plugins"
 cp "$tv_src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.dll" "$tv_pkg/BepInEx/plugins/"
+cp "$tv_src/CardShopCoop.PurchaseOverhaul/CardShopCoop.PurchaseOverhaul.dll" "$tv_pkg/BepInEx/plugins/"
 cp thunderstore/ExternalModInterop-README.md "$tv_pkg/README.md"
 ( cd "$tv_pkg" && zip -q -r "../CardShopCoop.ExternalModInterop.zip" BepInEx README.md )
 

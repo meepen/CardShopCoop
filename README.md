@@ -12,7 +12,8 @@ the exact same as if you were running it on your own! Join via Steam or via the 
 new cards, card packs, furniture, workers, etc.
 
 **Mod Expandable** -- For mods that add new custom logic, such as the Custom TV mod, the mod
-owners can expand it. The Custom TV was expanded by us as an example as an optional download!
+owners can expand it. The Custom TV and Purchase Overhaul integrations are available as an optional
+ExternalModInterop download!
 
 **Xbox/GamePass compatible** -- Works with the version on Xbox/Gamepass! Even (mostly) supports
 Xbox and Steam users to be able to play with each other!

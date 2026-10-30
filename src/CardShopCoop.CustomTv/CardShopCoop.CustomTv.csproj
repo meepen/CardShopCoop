@@ -79,15 +79,18 @@
   </Target>
 
   <Target Name="Package" AfterTargets="Build" Condition="'$(Package)' == 'true'">
-    <!-- The external-mod interop bundle. It currently holds just Custom TV; future interop mods
-         are added as additional <FolderName>/<Dll> entries in PackageDirectory. -->
+    <!-- The external-mod interop bundle: RTCGO Custom TV and Purchase Overhaul co-op support. -->
     <PropertyGroup>
       <PackageDirectory>$(IntermediateOutputPath)package</PackageDirectory>
       <PackageZip>$(OutputPath)CardShopCoop.ExternalModInterop.zip</PackageZip>
+      <PurchaseOverhaulDll>$(MSBuildThisFileDirectory)..\CardShopCoop.PurchaseOverhaul\bin\Release\CardShopCoop.PurchaseOverhaul.dll</PurchaseOverhaulDll>
     </PropertyGroup>
     <RemoveDir Directories="$(PackageDirectory)" />
     <MakeDir Directories="$(PackageDirectory)/$(AssemblyName)" />
+    <MakeDir Directories="$(PackageDirectory)/CardShopCoop.PurchaseOverhaul" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
+    <Copy SourceFiles="$(PurchaseOverhaulDll)" DestinationFolder="$(PackageDirectory)/CardShopCoop.PurchaseOverhaul"
+          Condition="Exists('$(PurchaseOverhaulDll)')" />
     <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
   </Target>
 

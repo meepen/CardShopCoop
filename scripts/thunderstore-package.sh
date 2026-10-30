@@ -8,6 +8,7 @@
 # Expects the GitHub release artifacts already downloaded into dist/:
 #   dist/CardShopCoop.zip                      -> CardShopCoop/CardShopCoop.dll, CardShopCoop.Api.dll
 #   dist/CardShopCoop.ExternalModInterop.zip   -> CardShopCoop.CustomTv/CardShopCoop.CustomTv.dll
+#                                                 CardShopCoop.PurchaseOverhaul/CardShopCoop.PurchaseOverhaul.dll
 #
 # and the Thunderstore metadata in thunderstore/ (manifest.core.json, manifest.interop.json,
 # ExternalModInterop-README.md, icon.png at 256x256). Writes:
@@ -76,6 +77,7 @@ tv_pkg="$work/.tv"
 unzip_into "dist/CardShopCoop.ExternalModInterop.zip" "$tv_src"
 mkdir -p "$tv_pkg/BepInEx/plugins"
 cp "$tv_src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.dll" "$tv_pkg/BepInEx/plugins/"
+cp "$tv_src/CardShopCoop.PurchaseOverhaul/CardShopCoop.PurchaseOverhaul.dll" "$tv_pkg/BepInEx/plugins/"
 settle_manifest "$meta/manifest.interop.json" "$tv_pkg/manifest.json"
 cp "$icon" "$tv_pkg/icon.png"
 cp "$meta/ExternalModInterop-README.md" "$tv_pkg/README.md"

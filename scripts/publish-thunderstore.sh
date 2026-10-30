@@ -69,5 +69,5 @@ publish_thunderstore "CardShopCoopCommunity" \
   "True co-op multiplayer for TCG Card Shop Simulator." \
   "dist/thunderstore/CardShopCoop.zip"
 publish_thunderstore "CardShopCoopCommunity_ExternalModInterop" \
-  "Optional external-mod interop bundle for CardShopCoopCommunity (currently RTCGO Custom TV sync)." \
+  "Optional external-mod interop bundle for CardShopCoopCommunity (RTCGO Custom TV and Purchase Overhaul sync)." \
   "dist/thunderstore/CardShopCoop.ExternalModInterop.zip"

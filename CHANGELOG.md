@@ -7,6 +7,7 @@
 - Players are now addressed as peer objects (`Context.Self`, `Context.Host`, `Context.Peers`).
 - Public API now is versioned separately from the main mod, starting at 2.3.0
 - The example mod now follows the API version and is published only on Nexus Mods.
+- The ExternalModInterop bundle now includes Purchase Overhaul order/licence co-op sync alongside RTCGO Custom TV.
 - Fixed: Shelf cascading errors.
 
 ## 2.2.1

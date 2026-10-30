@@ -2,7 +2,8 @@
 
 Optional bundle of external-mod integrations for
 [CardShopCoopCommunity](https://thunderstore.io/c/tcg-card-shop-simulator/p/CardShopCoop/CardShopCoopCommunity/).
-It currently ships **RTCGO Custom TV** playback sync.
+It currently ships **RTCGO Custom TV** playback sync and **Purchase Overhaul** order/licence
+co-op sync.
 
 - Requires **CardShopCoopCommunity** — declared as a dependency, so the mod manager installs it for you.
 - **Both players must install it** for the shared feature (for example TV state) to sync. Without it,

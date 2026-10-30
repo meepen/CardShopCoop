@@ -2,7 +2,7 @@
   "name": "CardShopCoopCommunity_ExternalModInterop",
   "version_number": "__VERSION__",
   "website_url": "https://github.com/meepen/CardShopCoop",
-  "description": "Optional external-mod interop bundle for CardShopCoopCommunity (currently RTCGO Custom TV sync).",
+  "description": "Optional external-mod interop bundle for CardShopCoopCommunity (RTCGO Custom TV and Purchase Overhaul sync).",
   "dependencies": [
     "BepInEx-BepInExPack-5.4.2305",
     "CardShopCoop-CardShopCoopCommunity-__VERSION__"
