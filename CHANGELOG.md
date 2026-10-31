@@ -1,5 +1,9 @@
 # CardShopCoopCommunity — Changelog
 
+## 2.3.1
+
+- Removed a redundant `Assembly.Load` call at startup.
+
 ## 2.3.0
 
 - LOTS of prepwork for proper external mod compatibility:

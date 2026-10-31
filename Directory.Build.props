@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Single source of truth for the plugin's public/release version. -->
-    <CardShopCoopVersion>2.3.0</CardShopCoopVersion>
+    <CardShopCoopVersion>2.3.1</CardShopCoopVersion>
     <!-- Independent public API assembly version; bumps only for public API changes. -->
     <CardShopCoopApiVersion>2.3.0</CardShopCoopApiVersion>
     <!-- "Deploy" is a solution configuration meaning "build and copy into the game". A

@@ -4,7 +4,6 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using System;
 using System.Runtime.CompilerServices;
-using System.Reflection;
 using UnityEngine;
 using CardShopCoop.Api;
 
@@ -87,15 +86,6 @@ namespace CardShopCoop
             // latch before any game scene can hand a destroyed object to a second world's Awake.
             Util.SingletonLatchGuard.Install();
             Util.ScreenSingletonGuard.Install();
-            try
-            {
-                Assembly.Load("Newtonsoft.Json");
-                Logger.LogInfo("network payload serializer: Newtonsoft.Json");
-            }
-            catch (Exception e)
-            {
-                Logger.LogError("network payload serializer unavailable: Newtonsoft.Json.dll is required (" + e.Message + ")");
-            }
             Util.FileLog.Init(Paths.GameRootPath);
             Logger.LogEvent += (_, e) => Util.FileLog.Write($"{e.Level,-7} {e.Data}");
 
