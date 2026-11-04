@@ -1,3 +1,5 @@
+using CardShopCoop.Modules.Grading;
+using CardShopCoop.Modules.World;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.Pricing
@@ -194,6 +196,43 @@ namespace CardShopCoop.Modules.Pricing
             harmony.CreateClassProcessor(typeof(PriceTagInitCard)).Patch();
             harmony.CreateClassProcessor(typeof(PriceTagItemImage)).Patch();
             harmony.CreateClassProcessor(typeof(PriceTagCardData)).Patch();
+            harmony.CreateClassProcessor(typeof(OpenSetCardPriceScreenPatch)).Patch();
+        }
+
+        [HarmonyPatch(typeof(SetItemPriceScreen), "OpenSetCardPriceScreen")]
+        [HarmonyPriority(Priority.High)]
+        private static class OpenSetCardPriceScreenPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(SetItemPriceScreen __instance, CardData cardData,
+                InteractableCardCompartment cardCompartment)
+            {
+                if (cardData == null)
+                {
+                    return;
+                }
+
+                var encoded = int.MinValue;
+                if (cardCompartment != null)
+                {
+                    var displayed = WorldCardDisplay.Read(cardCompartment);
+                    if (displayed != null)
+                    {
+                        encoded = WorldCardDisplay.EncodedGradeOf(displayed);
+                    }
+                }
+
+                if (encoded <= 10 && cardData.cardGrade > 10)
+                {
+                    encoded = cardData.cardGrade;
+                }
+
+                if (encoded > 10)
+                {
+                    cardData.cardGrade = encoded;
+                    GradingApi.Remember(cardData, encoded);
+                }
+            }
         }
 
         [HarmonyPatch(typeof(UI_PriceTag), "OnEnable")]

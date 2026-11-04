@@ -43,6 +43,20 @@ namespace CardShopCoop.Modules.Grading
         private static readonly Type TDayStartPatch = ModParity.ResolveType(
             "TCGCardShopSimulator.GradingOverhaul.CompanyStamp_RestockManager_OnDayStartedPatch",
             GradingAssembly);
+        private static readonly Type TCertIntegrityScan = ReflectionSurface.OptionalType(
+            "TCGCardShopSimulator.GradingOverhaul.CertIntegrityScan", GradingAssembly);
+        private static readonly Type TAntiCheatAddCardPatch = ReflectionSurface.OptionalType(
+            "TCGCardShopSimulator.GradingOverhaul.AntiCheat_AddCard_Patch", GradingAssembly);
+        private static readonly Type TAntiCheatDayStartScanPatch = ReflectionSurface.OptionalType(
+            "TCGCardShopSimulator.GradingOverhaul.AntiCheat_DayStart_Scan_Patch", GradingAssembly);
+
+        internal static readonly MethodInfo MiScanAndFlagDuplicateCerts = TCertIntegrityScan == null ? null
+            : ReflectionSurface.OptionalMethod(TCertIntegrityScan, "ScanAndFlagDuplicateCerts");
+        internal static readonly MethodInfo MiAntiCheatAddCardPrefix = TAntiCheatAddCardPatch == null ? null
+            : ReflectionSurface.OptionalMethod(TAntiCheatAddCardPatch, "Prefix", typeof(CardData));
+        internal static readonly MethodInfo MiAntiCheatDayStartScanPostfix = TAntiCheatDayStartScanPatch == null ? null
+            : ReflectionSurface.OptionalMethod(TAntiCheatDayStartScanPatch, "Postfix");
+
         private static readonly Type TSubmitValidatorPatch = ModParity.ResolveType(
             "TCGCardShopSimulator.GradingOverhaul.GradingSubmit_CompanyValidation_Patch",
             GradingAssembly);
@@ -58,6 +72,13 @@ namespace CardShopCoop.Modules.Grading
                 TCompany.MakeByRefType(), typeof(int).MakeByRefType(), typeof(int).MakeByRefType());
         private static readonly MethodInfo MiCheat = THelper == null ? null
             : ReflectionSurface.OptionalMethod(THelper, "IsCheatFlagged", typeof(int));
+
+        private static readonly Type TCompanyPriceStore = ReflectionSurface.OptionalType(
+            "TCGCardShopSimulator.GradingOverhaul.CompanyPriceStore", GradingAssembly);
+        private static readonly MethodInfo MiCompanyPriceSet = TCompanyPriceStore == null ? null
+            : ReflectionSurface.OptionalMethod(TCompanyPriceStore, "Set", typeof(CardData), typeof(int), typeof(float));
+        private static readonly MethodInfo MiCompanyPriceTryGet = TCompanyPriceStore == null ? null
+            : ReflectionSurface.OptionalMethod(TCompanyPriceStore, "TryGet", typeof(CardData), typeof(int), typeof(float).MakeByRefType());
 
         private static readonly PropertyInfo PiCurrentCompany = TTheme == null ? null
             : ReflectionSurface.OptionalProperty(TTheme, "CurrentWebsiteCompany");
@@ -597,6 +618,75 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
+        internal static bool Remember(CardData card, int encodedGrade)
+        {
+            if (!GoCompatible || card == null || MiRemember == null || encodedGrade <= 10)
+            {
+                return false;
+            }
+
+            if (!CertFreeForCard(card, encodedGrade))
+            {
+                return false;
+            }
+
+            try
+            {
+                var result = MiRemember.Invoke(null, new object[] { card, encodedGrade });
+                return result is bool success ? success : true;
+            }
+            catch (Exception error)
+            {
+                CoopPlugin.Log.LogWarning("GradingInterop.Remember: " + error.Message);
+                return false;
+            }
+        }
+
+        internal static bool TryGetCompanyPrice(CardData card, int encodedGrade, out float price)
+        {
+            price = 0f;
+            if (MiCompanyPriceTryGet == null || card == null || encodedGrade <= 10)
+            {
+                return false;
+            }
+
+            try
+            {
+                var args = new object[] { card, encodedGrade, 0f };
+                var ok = (bool)MiCompanyPriceTryGet.Invoke(null, args);
+                if (ok)
+                {
+                    price = (float)args[2];
+                    return true;
+                }
+                return false;
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+                return false;
+            }
+        }
+
+        internal static bool SetCompanyPrice(CardData card, int encodedGrade, float price)
+        {
+            if (MiCompanyPriceSet == null || card == null || encodedGrade <= 10)
+            {
+                return false;
+            }
+
+            try
+            {
+                MiCompanyPriceSet.Invoke(null, new object[] { card, encodedGrade, price });
+                return true;
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+                return false;
+            }
+        }
+
         internal static bool IsAllowedCompany(int id)
         {
             if (TCompany == null || !TCompany.IsEnum)
@@ -927,6 +1017,11 @@ namespace CardShopCoop.Modules.Grading
                 return false;
             }
 
+            if (CoopCore.Role == CoopRole.Client)
+            {
+                return Encoded(card) > 10;
+            }
+
             try
             {
                 var company = Enum.ToObject(TCompany, companyId);
@@ -972,6 +1067,11 @@ namespace CardShopCoop.Modules.Grading
         private static bool CertFreeForCard(CardData card, int encoded)
         {
             if (CheatFlagged(encoded))
+            {
+                return true;
+            }
+
+            if (CoopCore.Role == CoopRole.Client)
             {
                 return true;
             }
@@ -1034,6 +1134,143 @@ namespace CardShopCoop.Modules.Grading
                 CoopPlugin.Log.LogWarning("GradingInterop rollback " + operation + " failed: "
                     + error.Message);
                 return false;
+            }
+        }
+
+        internal static void ReloadSaveSlot(int slot)
+        {
+            if (TSaveManager == null || slot < 0)
+            {
+                return;
+            }
+
+            try
+            {
+                var mi = TSaveManager.GetMethod("OnSlotLoaded",
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                mi?.Invoke(null, new object[] { slot });
+                CoopPlugin.Log.LogInfo("GradingInterop: reloaded Grading Overhaul save slot " + slot + ".");
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("GradingInterop: ReloadSaveSlot failed: " + ex.Message);
+            }
+        }
+
+        internal static void SanitizeCheatFlaggedCards()
+        {
+            if (CoopCore.Role != CoopRole.Client)
+            {
+                return;
+            }
+
+            try
+            {
+                var count = 0;
+                var inv = CPlayerData.m_GradedCardInventoryList;
+                if (inv != null)
+                {
+                    for (var i = 0; i < inv.Count; i++)
+                    {
+                        var item = inv[i];
+                        if (item != null && item.amount >= 1000000000)
+                        {
+                            item.amount -= 1000000000;
+                            count++;
+                        }
+                    }
+                }
+
+                var held = CPlayerData.m_HoldCardDataList;
+                if (held != null)
+                {
+                    for (var i = 0; i < held.Count; i++)
+                    {
+                        var card = held[i];
+                        if (card != null && card.cardGrade >= 1000000000)
+                        {
+                            card.cardGrade -= 1000000000;
+                            count++;
+                        }
+                    }
+                }
+
+                var shelfSaves = CPlayerData.m_CardShelfSaveDataList;
+                if (shelfSaves != null)
+                {
+                    for (var i = 0; i < shelfSaves.Count; i++)
+                    {
+                        var shelf = shelfSaves[i];
+                        var cards = shelf?.cardDataList;
+                        if (cards == null)
+                        {
+                            continue;
+                        }
+                        for (var j = 0; j < cards.Count; j++)
+                        {
+                            var card = cards[j];
+                            if (card != null && card.cardGrade >= 1000000000)
+                            {
+                                card.cardGrade -= 1000000000;
+                                count++;
+                            }
+                        }
+                    }
+                }
+
+                var boxSaves = CPlayerData.m_PackageBoxCardSaveDataList;
+                if (boxSaves != null)
+                {
+                    for (var i = 0; i < boxSaves.Count; i++)
+                    {
+                        var box = boxSaves[i];
+                        var cards = box?.cardDataList;
+                        if (cards == null)
+                        {
+                            continue;
+                        }
+                        for (var j = 0; j < cards.Count; j++)
+                        {
+                            var card = cards[j];
+                            if (card != null && card.cardGrade >= 1000000000)
+                            {
+                                card.cardGrade -= 1000000000;
+                                count++;
+                            }
+                        }
+                    }
+                }
+
+                try
+                {
+                    var tags = UnityEngine.Resources.FindObjectsOfTypeAll<UI_PriceTag>();
+                    for (var i = 0; i < tags.Length; i++)
+                    {
+                        var tag = tags[i];
+                        if (tag == null)
+                        {
+                            continue;
+                        }
+                        var card = tag.GetCardData();
+                        if (card != null && card.cardGrade >= 1000000000)
+                        {
+                            card.cardGrade -= 1000000000;
+                            count++;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+
+                if (count > 0)
+                {
+                    CoopPlugin.Log.LogInfo("Grading: sanitized " + count + " cheat-flagged card(s) on guest client.");
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("Grading: SanitizeCheatFlaggedCards error: " + ex.Message);
             }
         }
 

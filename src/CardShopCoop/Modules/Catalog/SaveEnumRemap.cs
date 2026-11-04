@@ -4,6 +4,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+using UnityEngine;
 
 namespace CardShopCoop.Modules.Catalog
 {
@@ -45,6 +49,116 @@ namespace CardShopCoop.Modules.Catalog
             Walk(root, new HashSet<object>(ReferenceComparer.Instance), 0, stats);
             CoopPlugin.Log.LogInfo("save enum remap: changed " + stats.Changed
                 + " gated value(s)." + stats.Describe());
+        }
+
+        private const string GradingOverhaulKey = "GradingOverhaul_v1_TCGCardShop_2024";
+
+        /// <summary>
+        /// Rewrites host expansion enum IDs inside Grading Overhaul's sidecar save (GradingOverhaul_{slot}.json)
+        /// into this client's local enum IDs so that certificate bindings and company prices match local card IDs.
+        /// </summary>
+        public static void ApplyGradingOverhaul(int slot)
+        {
+            if (slot < 0)
+            {
+                return;
+            }
+
+            try
+            {
+                var dir = Path.Combine(Application.persistentDataPath, "Grading - Overhaul");
+                var path = Path.Combine(dir, "GradingOverhaul_" + slot + ".json");
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+
+                var encoded = File.ReadAllText(path);
+                if (string.IsNullOrEmpty(encoded))
+                {
+                    return;
+                }
+
+                var raw = DecodeGoSave(encoded);
+                if (string.IsNullOrEmpty(raw))
+                {
+                    return;
+                }
+
+                var changed = 0;
+
+                // Remap CertBindings: "Company:Cert": "CardSaveIndex:HostExp:IsFoil"
+                var cbRegex = new Regex(@"""(\w+:\d+)""\s*:\s*""(\d+):(\d+):(\d+)""");
+                var remapped = cbRegex.Replace(raw, match =>
+                {
+                    if (int.TryParse(match.Groups[3].Value, out var hostExp))
+                    {
+                        var localExp = CatalogIdMap.FromHostValue(EnumKind.CardExpansion, hostExp);
+                        if (localExp != hostExp)
+                        {
+                            changed++;
+                            return "\"" + match.Groups[1].Value + "\":\"" + match.Groups[2].Value + ":" + localExp + ":" + match.Groups[4].Value + "\"";
+                        }
+                    }
+                    return match.Value;
+                });
+
+                // Remap CompanyPrices: "CardSaveIndex|HostExp|IsFoil|Company|Grade|Subgrade": Price
+                var cpRegex = new Regex(@"""(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|(\d+)""\s*:\s*([\d\.]+)");
+                remapped = cpRegex.Replace(remapped, match =>
+                {
+                    if (int.TryParse(match.Groups[2].Value, out var hostExp))
+                    {
+                        var localExp = CatalogIdMap.FromHostValue(EnumKind.CardExpansion, hostExp);
+                        if (localExp != hostExp)
+                        {
+                            changed++;
+                            return "\"" + match.Groups[1].Value + "|" + localExp + "|" + match.Groups[3].Value + "|" + match.Groups[4].Value + "|" + match.Groups[5].Value + "|" + match.Groups[6].Value + "\":" + match.Groups[7].Value;
+                        }
+                    }
+                    return match.Value;
+                });
+
+                if (changed > 0)
+                {
+                    var updatedEncoded = EncodeGoSave(remapped);
+                    File.WriteAllText(path, updatedEncoded);
+                    CoopPlugin.Log.LogInfo("save enum remap: translated " + changed + " Grading Overhaul entry(s) in slot " + slot + ".");
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("save enum remap: failed translating Grading Overhaul save in slot " + slot + ": " + ex.Message);
+            }
+        }
+
+        private static string DecodeGoSave(string encoded)
+        {
+            try
+            {
+                var bytes = Convert.FromBase64String(encoded);
+                var key = Encoding.UTF8.GetBytes(GradingOverhaulKey);
+                for (var i = 0; i < bytes.Length; i++)
+                {
+                    bytes[i] = (byte)(bytes[i] ^ key[i % key.Length]);
+                }
+                return Encoding.UTF8.GetString(bytes);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string EncodeGoSave(string raw)
+        {
+            var bytes = Encoding.UTF8.GetBytes(raw);
+            var key = Encoding.UTF8.GetBytes(GradingOverhaulKey);
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                bytes[i] = (byte)(bytes[i] ^ key[i % key.Length]);
+            }
+            return Convert.ToBase64String(bytes);
         }
 
         private sealed class RemapStats

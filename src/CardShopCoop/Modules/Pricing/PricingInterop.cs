@@ -1,6 +1,9 @@
 using System;
+using System.Reflection;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Grading;
+using CardShopCoop.Runtime;
+using HarmonyLib;
 
 namespace CardShopCoop.Modules.Pricing
 {
@@ -92,6 +95,23 @@ namespace CardShopCoop.Modules.Pricing
         /// tag). A store that cannot hold the value is not an invalid intent, so this accepts the
         /// requested price instead of reporting the read-back: rejecting here rolled the setter
         /// back and left them looking at the old price while every other peer showed the new one.</summary>
+        private static readonly FieldInfo FiPriceScreenIsCard =
+            AccessTools.Field(typeof(SetItemPriceScreen), "m_IsSetCardPrice");
+        private static readonly FieldInfo FiPriceScreenCardCompartment =
+            AccessTools.Field(typeof(SetItemPriceScreen), "m_CurrentCardCompartment");
+
+        internal static InteractableCardCompartment CurrentCardPriceCompartment()
+        {
+            var screen = SceneRef<SetItemPriceScreen>.Get();
+            if (screen == null || FiPriceScreenIsCard == null
+                || !(bool)FiPriceScreenIsCard.GetValue(screen))
+            {
+                return null;
+            }
+
+            return FiPriceScreenCardCompartment?.GetValue(screen) as InteractableCardCompartment;
+        }
+
         internal static bool SetCard(CardData card, float price, out float actual)
         {
             actual = 0f;
@@ -100,6 +120,13 @@ namespace CardShopCoop.Modules.Pricing
                 return false;
             }
 
+            var encodedGrade = GradingApi.Encoded(card);
+            if (encodedGrade > 10)
+            {
+                card.cardGrade = encodedGrade;
+                GradingApi.Remember(card, encodedGrade);
+                GradingApi.SetCompanyPrice(card, encodedGrade, price);
+            }
 
             CPlayerData.SetCardPrice(card, price);
             actual = ReadCard(card);
@@ -107,7 +134,6 @@ namespace CardShopCoop.Modules.Pricing
             {
                 return true;
             }
-
 
             CoopPlugin.Log.LogWarning("[pricing] card price store did not hold " + price
                 + " for expansion=" + (int)card.expansionType + " monster=" + (int)card.monsterType
@@ -121,10 +147,18 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (card == null)
             {
-
                 throw new ArgumentNullException(nameof(card));
             }
 
+            var encodedGrade = GradingApi.Encoded(card);
+            if (encodedGrade > 10)
+            {
+                GradingApi.Remember(card, encodedGrade);
+                if (GradingApi.TryGetCompanyPrice(card, encodedGrade, out var storedPrice))
+                {
+                    return storedPrice;
+                }
+            }
 
             try
             {
@@ -219,6 +253,10 @@ namespace CardShopCoop.Modules.Pricing
 
 
             var grade = encodedGrade == int.MinValue ? GradingApi.Encoded(card) : encodedGrade;
+            if (grade >= 1000000000)
+            {
+                grade -= 1000000000;
+            }
             return (int)card.expansionType + ":" + (int)card.monsterType + ":"
                 + (int)card.borderType + ":" + (card.isFoil ? 1 : 0) + ":"
                 + (card.isDestiny ? 1 : 0) + ":" + (card.isChampionCard ? 1 : 0)

@@ -169,21 +169,54 @@ namespace CardShopCoop.Modules.World
                 cardUI.m_CardUI.SetFoilCullListVisibility(true);
                 cardUI.SetSimplifyCardDistanceCull(false);
                 cardUI.m_CardUI.ResetFarDistanceCull();
-                if (card.cardGrade > 10)
+                var encodedGrade = card.cardGrade;
+                if (encodedGrade > 10)
                 {
                     // A reconstructed display card carries the ENCODED grade. Register the
                     // certificate like every other reconstruction path, or Grading Overhaul
                     // renders the bare grade and the slot keeps failing Matches -> clear/replace
                     // churn. No-op when Grading Overhaul is absent.
-                    GradingApi.Remember(card);
+                    GradingApi.Remember(card, encodedGrade);
                 }
 
                 cardUI.m_CardUI.SetCardUI(card);
+                if (encodedGrade > 10)
+                {
+                    card.cardGrade = encodedGrade;
+                    GradingApi.Remember(card, encodedGrade);
+                }
                 cardUI.transform.position = card3d.transform.position;
                 cardUI.transform.rotation = card3d.transform.rotation;
                 card3d.SetCardUIFollow(cardUI);
                 card3d.SetEnableCollision(false);
                 compartment.SetCardOnShelf(card3d);
+                if (encodedGrade > 10)
+                {
+                    card.cardGrade = encodedGrade;
+                    GradingApi.Remember(card, encodedGrade);
+                    var displayed = Read(compartment);
+                    if (displayed != null)
+                    {
+                        displayed.cardGrade = encodedGrade;
+                        GradingApi.Remember(displayed, encodedGrade);
+                    }
+                    if (compartment.m_InteractablePriceTagList != null)
+                    {
+                        for (var i = 0; i < compartment.m_InteractablePriceTagList.Count; i++)
+                        {
+                            var pt = compartment.m_InteractablePriceTagList[i];
+                            if (pt != null && pt.m_PriceTagUI != null)
+                            {
+                                var ptCard = pt.m_PriceTagUI.GetCardData();
+                                if (ptCard != null)
+                                {
+                                    ptCard.cardGrade = encodedGrade;
+                                    GradingApi.Remember(ptCard, encodedGrade);
+                                }
+                            }
+                        }
+                    }
+                }
                 cardUI.m_IgnoreCulling = false;
                 return true;
             }

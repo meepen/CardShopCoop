@@ -11,6 +11,14 @@ namespace CardShopCoop.Modules.Grading
 
         public static bool Remember(CardData card) => GradingInterop.Remember(card);
 
+        public static bool Remember(CardData card, int encodedGrade) => GradingInterop.Remember(card, encodedGrade);
+
+        public static bool TryGetCompanyPrice(CardData card, int encodedGrade, out float price)
+            => GradingInterop.TryGetCompanyPrice(card, encodedGrade, out price);
+
+        public static bool SetCompanyPrice(CardData card, int encodedGrade, float price)
+            => GradingInterop.SetCompanyPrice(card, encodedGrade, price);
+
         /// <summary>Human-readable "COMPANY grade=N cert=N" for a graded card, or null when it is
         /// ungraded / Grading Overhaul is absent. Diagnostics only.</summary>
         public static string DescribeCert(CardData card)

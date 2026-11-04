@@ -28,6 +28,7 @@ namespace CardShopCoop.Modules.Grading
             // priority-400 one). GO's own Prefix therefore has to be wrapped as well, or a GO
             // guest still grades cards, mints certificates and spawns a second delivery box.
             TryPatchGoDayStart(harmony);
+            TryPatchGoAntiCheat(harmony);
             // Never trust that the guards installed: a silently missing guard would let the
             // guest grade its own jobs again. Verify both and fail closed, loudly, if not.
             ValidateGuestDayStartSurface(harmony);
@@ -248,10 +249,59 @@ namespace CardShopCoop.Modules.Grading
                 new HarmonyMethod(typeof(GradingPatches), nameof(DataLifecyclePostfix)));
         }
 
+        private static void TryPatchGoAntiCheat(Harmony harmony)
+        {
+            if (!GradingInterop.GoDetected)
+            {
+                return;
+            }
+
+            try
+            {
+                if (GradingInterop.MiScanAndFlagDuplicateCerts != null)
+                {
+                    harmony.Patch(GradingInterop.MiScanAndFlagDuplicateCerts,
+                        prefix: new HarmonyMethod(typeof(GradingPatches), nameof(ClientScanAndFlagPrefix)));
+                }
+
+                if (GradingInterop.MiAntiCheatAddCardPrefix != null)
+                {
+                    harmony.Patch(GradingInterop.MiAntiCheatAddCardPrefix,
+                        prefix: new HarmonyMethod(typeof(GradingPatches), nameof(ClientSkipGoPrefix)));
+                }
+
+                if (GradingInterop.MiAntiCheatDayStartScanPostfix != null)
+                {
+                    harmony.Patch(GradingInterop.MiAntiCheatDayStartScanPostfix,
+                        prefix: new HarmonyMethod(typeof(GradingPatches), nameof(ClientSkipGoPrefix)));
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("Grading: failed installing AntiCheat guards: " + ex.Message);
+            }
+        }
+
+        private static bool ClientScanAndFlagPrefix(ref int __result)
+        {
+            if (CoopCore.Role == CoopRole.Client)
+            {
+                __result = 0;
+                return false;
+            }
+            return true;
+        }
+
+        private static bool ClientSkipGoPrefix()
+        {
+            return CoopCore.Role != CoopRole.Client;
+        }
+
         private static void DataLifecyclePostfix()
         {
             GradingHostBehaviour.InventoryReset();
             GradingClientBehaviour.InventoryReset();
+            GradingInterop.SanitizeCheatFlaggedCards();
         }
     }
 }

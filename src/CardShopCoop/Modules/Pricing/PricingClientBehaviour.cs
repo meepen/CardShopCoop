@@ -239,7 +239,15 @@ namespace CardShopCoop.Modules.Pricing
 
 
             var copy = PricingInterop.CopyCard(entry.Card, entry.EncodedGrade);
-            GradingApi.Remember(copy);
+            if (entry.EncodedGrade > 10)
+            {
+                GradingApi.Remember(copy, entry.EncodedGrade);
+                GradingApi.SetCompanyPrice(copy, entry.EncodedGrade, entry.Price);
+            }
+            else
+            {
+                GradingApi.Remember(copy);
+            }
             _applying = true;
             try
             {
@@ -305,10 +313,20 @@ namespace CardShopCoop.Modules.Pricing
             var active = _active;
             if (active == null || active._applying || !PricingInterop.ValidCard(card))
             {
-
                 return float.NaN;
             }
 
+            var compartment = CurrentCardPriceCompartment();
+            if (card.cardGrade <= 10 && compartment != null)
+            {
+                var displayed = WorldCardDisplay.Read(compartment);
+                var displayedGrade = WorldCardDisplay.EncodedGradeOf(displayed);
+                if (displayedGrade > 10)
+                {
+                    card.cardGrade = displayedGrade;
+                    GradingApi.Remember(card, displayedGrade);
+                }
+            }
 
             return PricingInterop.ReadCard(card);
         }
@@ -324,7 +342,6 @@ namespace CardShopCoop.Modules.Pricing
                 return;
             }
 
-
             var compartment = CurrentCardPriceCompartment();
             if (compartment == null
                 || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
@@ -338,7 +355,27 @@ namespace CardShopCoop.Modules.Pricing
             }
 
             var grade = GradingApi.Encoded(card);
-            GradingApi.Remember(card);
+            if (grade <= 10 && compartment != null)
+            {
+                var displayed = WorldCardDisplay.Read(compartment);
+                var displayedGrade = WorldCardDisplay.EncodedGradeOf(displayed);
+                if (displayedGrade > 10)
+                {
+                    grade = displayedGrade;
+                    card.cardGrade = grade;
+                }
+            }
+
+            if (grade > 10)
+            {
+                GradingApi.Remember(card, grade);
+                GradingApi.SetCompanyPrice(card, grade, price);
+            }
+            else
+            {
+                GradingApi.Remember(card);
+            }
+
             active.PredictCard(card, price, grade, previous, shelf, index);
         }
 
@@ -348,16 +385,7 @@ namespace CardShopCoop.Modules.Pricing
         /// content lookup. Client workers never run their state machine (NpcClientBehaviour skips
         /// Worker.Update), so a client card price change always originates here.</summary>
         private static InteractableCardCompartment CurrentCardPriceCompartment()
-        {
-            var screen = SceneRef<SetItemPriceScreen>.Get();
-            if (screen == null || FiPriceScreenIsCard == null
-                || !(bool)FiPriceScreenIsCard.GetValue(screen))
-            {
-                return null;
-            }
-
-            return FiPriceScreenCardCompartment?.GetValue(screen) as InteractableCardCompartment;
-        }
+            => PricingInterop.CurrentCardPriceCompartment();
 
         private void PredictItem(EItemType type, float price, float previous)
         {

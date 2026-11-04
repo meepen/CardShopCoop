@@ -302,15 +302,35 @@ namespace CardShopCoop.Modules.Pricing
                 return;
             }
 
-
+            var compartment = PricingInterop.CurrentCardPriceCompartment();
             var grade = GradingApi.Encoded(card);
+            if (grade <= 10 && compartment != null)
+            {
+                var displayed = WorldCardDisplay.Read(compartment);
+                var displayedGrade = WorldCardDisplay.EncodedGradeOf(displayed);
+                if (displayedGrade > 10)
+                {
+                    grade = displayedGrade;
+                    card.cardGrade = grade;
+                }
+            }
+
+            if (grade > 10)
+            {
+                GradingApi.Remember(card, grade);
+                GradingApi.SetCompanyPrice(card, grade, requestedPrice);
+            }
+            else
+            {
+                GradingApi.Remember(card);
+            }
+
             var canonical = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(canonical, grade);
             if (key == null)
             {
                 return;
             }
-
 
             var price = ResolveCardPrice(canonical, requestedPrice);
             _cards[key] = new OwnedCardState

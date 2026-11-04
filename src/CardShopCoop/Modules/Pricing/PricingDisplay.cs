@@ -72,14 +72,14 @@ namespace CardShopCoop.Modules.Pricing
             return Items.TryGetValue(type, out var price) ? price : PricingInterop.ReadItem(type);
         }
 
-        internal static float ReadCard(CardData card)
+        internal static float ReadCard(CardData card, int encodedGrade = int.MinValue)
         {
             if (card == null || !PricingInterop.ValidCard(card))
             {
                 return 0f;
             }
 
-            var key = PricingInterop.CardKey(card);
+            var key = PricingInterop.CardKey(card, encodedGrade);
             if (key != null && Cards.TryGetValue(key, out var price))
             {
                 return price;

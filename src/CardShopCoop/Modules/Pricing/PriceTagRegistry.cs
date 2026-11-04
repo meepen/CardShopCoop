@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Api;
+using CardShopCoop.Modules.Grading;
+using CardShopCoop.Modules.World;
 using HarmonyLib;
 using UnityEngine;
 
@@ -64,6 +66,33 @@ namespace CardShopCoop.Modules.Pricing
             }
         }
 
+        private static int ResolveTagEncodedGrade(UI_PriceTag tag, InteractableCardPriceTag cardTag, CardData card)
+        {
+            var encoded = GradingApi.Encoded(card);
+            if (encoded <= 10)
+            {
+                cardTag ??= FiCardTag?.GetValue(tag) as InteractableCardPriceTag;
+                var compartment = cardTag == null ? null
+                    : FiCardCompartment?.GetValue(cardTag) as InteractableCardCompartment;
+                if (compartment != null)
+                {
+                    var displayed = WorldCardDisplay.Read(compartment);
+                    var displayedGrade = WorldCardDisplay.EncodedGradeOf(displayed);
+                    if (displayedGrade > 10)
+                    {
+                        encoded = displayedGrade;
+                        card.cardGrade = encoded;
+                        GradingApi.Remember(card, encoded);
+                    }
+                }
+            }
+            else
+            {
+                GradingApi.Remember(card, encoded);
+            }
+            return encoded;
+        }
+
         internal static void Add(UI_PriceTag tag)
         {
             if (tag == null)
@@ -84,7 +113,8 @@ namespace CardShopCoop.Modules.Pricing
             var card = tag.GetCardData();
             if (card != null)
             {
-                var key = PricingInterop.CardKey(card);
+                var encoded = ResolveTagEncodedGrade(tag, cardTag, card);
+                var key = PricingInterop.CardKey(card, encoded);
                 if (key != null)
                 {
                     entry.Card = key;
@@ -192,7 +222,8 @@ namespace CardShopCoop.Modules.Pricing
                         return;
                     }
 
-                    tag.SetPriceText(PricingDisplay.ReadCard(card));
+                    var encoded = ResolveTagEncodedGrade(tag, cardTag, card);
+                    tag.SetPriceText(PricingDisplay.ReadCard(card, encoded));
                     return;
                 }
 

@@ -63,6 +63,14 @@ namespace CardShopCoop.Modules.Catalog
                     {
                         SaveEnumRemap.Apply(saved);
                         CoopPlugin.Log.LogInfo("save enum remap: translated the borrowed world's ids.");
+                        var slot = CGameManager.Instance?.m_CurrentSaveLoadSlotSelectedIndex ?? -1;
+                        if (slot < 0)
+                        {
+                            slot = CardShopCoop.Modules.SaveTransfer.SaveTransferApi.CoopSlot;
+                        }
+                        SaveEnumRemap.ApplyGradingOverhaul(slot);
+                        Grading.GradingInterop.ReloadSaveSlot(slot);
+                        Grading.GradingInterop.SanitizeCheatFlaggedCards();
                     }
                 }
                 catch (Exception error)
